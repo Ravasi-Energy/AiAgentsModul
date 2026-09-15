@@ -100,7 +100,11 @@ class _EnrichmentAgent(BaseAgent):
     use_deep_reasoning = False
 
     def __init__(self) -> None:
-        self.model = get_settings().research_model
+        # Routing-tier, not research-tier. This fires once per NEW signal on a
+        # 5-minute scan (up to external_monitor_max_signals_per_scan), so it is
+        # the highest-frequency background call in the system; scoring one
+        # signal against the company profile does not need a reasoning model.
+        self.model = get_settings().routing_model
 
     def get_system_prompt(self) -> str:
         return _ENRICH_SYSTEM_PROMPT
@@ -151,7 +155,6 @@ async def enrich_signal(
     The caller treats ``None`` as "no enrichment" and promotes the signal
     unchanged — enrichment is strictly additive and must never block an alert.
     """
-    from openexecutive.agents.research_council import get_research_model
 
     user_content = (
         f"{company_ctx}\n\n"
@@ -169,7 +172,7 @@ async def enrich_signal(
             actor="signal_enrichment",
             tools=[EMIT_RELEVANCE_TOOL],
             timeout_seconds=_ENRICH_TIMEOUT_SECONDS,
-            model_override=get_research_model(),
+            model_override=agent.model,
             deep_reasoning_override=False,
         )
     except Exception:

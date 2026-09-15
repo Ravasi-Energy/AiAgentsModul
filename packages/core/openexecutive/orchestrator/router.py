@@ -117,6 +117,12 @@ FANOUT_SKIP_MESSAGE = (
     "this specialist's input is still needed."
 )
 
+TURN_BUDGET_SKIP_MESSAGE = (
+    "Skipped: this turn has used its whole specialist budget "
+    "({budget} consultations). Answer with what the specialists already "
+    "returned; do not wait for this one."
+)
+
 
 def resolve_fanout_cap(max_parallel: int) -> int:
     """Effective per-turn specialist fan-out cap.
@@ -134,8 +140,10 @@ def partition_specialist_fanout(
     tool_uses: list[dict[str, Any]],
     calls: list[dict[str, Any]],
     max_parallel: int,
+    remaining_budget: int | None = None,
+    turn_budget: int | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, str], int]:
-    """Split a turn's specialist tool_uses/calls at the fan-out cap.
+    """Split a turn's specialist tool_uses/calls at the effective cap.
 
     ``tool_uses`` and ``calls`` must be 1:1 in the same order. Returns
     ``(run_tool_uses, run_calls, skipped_results, cap)``:
@@ -146,13 +154,25 @@ def partition_specialist_fanout(
         skip message, so the caller can hand EVERY consult_specialist tool_use
         a tool_result (Anthropic requires one result per tool_use).
       - ``cap`` — the resolved cap, for instrumentation.
+
+    ``max_parallel`` bounds ONE iteration. ``remaining_budget`` bounds what is
+    left of the whole turn (``None`` = untracked); when it is the binding
+    constraint the skip message says so, because "try a follow-up turn" is
+    the wrong advice when the budget is already spent. A ``remaining_budget``
+    of 0 or less dispatches nothing and skips every call.
     """
     cap = resolve_fanout_cap(max_parallel)
+    budget_bound = remaining_budget is not None and remaining_budget < cap
+    if budget_bound:
+        cap = max(remaining_budget or 0, 0)
+    message = (
+        TURN_BUDGET_SKIP_MESSAGE.format(budget=turn_budget)
+        if budget_bound
+        else FANOUT_SKIP_MESSAGE.format(cap=cap)
+    )
     run_tool_uses = tool_uses[:cap]
     run_calls = calls[:cap]
-    skipped_results = {
-        tu["id"]: FANOUT_SKIP_MESSAGE.format(cap=cap) for tu in tool_uses[cap:]
-    }
+    skipped_results = {tu["id"]: message for tu in tool_uses[cap:]}
     return run_tool_uses, run_calls, skipped_results, cap
 
 

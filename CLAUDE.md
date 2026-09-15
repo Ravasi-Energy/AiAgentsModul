@@ -53,11 +53,23 @@ The system is designed around Anthropic prompt caching. Breaking caching = 10x c
 
 **Never put dynamic content in system prompt blocks that have `cache_control`.**
 
-Build order in `prompts/cache_manager.py`:
-1. Tool definitions (sorted by name — MUST be sorted)
-2. Executive persona constant (from `prompts/executive_persona.py` — NEVER f-stringed)
-3. Company profile block (from `memory/company_profile.py`)
-4. Knowledge index summary
+Cached prefix order (most-stable-first — Anthropic caches a *prefix*):
+1. Tool definitions, sorted by name — MUST be sorted. Assembled in
+   `orchestrator/executive.py`, not `cache_manager.py`; the marker goes on the
+   LAST tool only, because tools are one cached prefix rather than N.
+2. System block 0 — Executive persona (from `prompts/executive_persona.py` —
+   NEVER f-stringed) with the knowledge index concatenated onto it.
+3. System block 1 — company profile (`memory/company_profile.py`) + org context.
+4. The rolling marker on the last assistant turn in history.
+
+**The 4-breakpoint budget is fully spent** (tools + 2 system + rolling message).
+Anthropic allows 4 per request, so a fifth marker anywhere is a hard 400 on
+every turn — `tests/unit/test_cache_breakpoint_budget.py` guards it.
+
+**A marker below the model's minimum cacheable length is silently ignored**
+(1024 tokens Sonnet/Opus, 2048 Haiku) — no error, no cache, billed as ordinary
+input. Do not add `cache_control` to a short prompt; it advertises caching that
+does not happen. See `tests/unit/test_prompt_cacheability.py`.
 
 RAG context goes in the **user turn**, not the system prompt.
 

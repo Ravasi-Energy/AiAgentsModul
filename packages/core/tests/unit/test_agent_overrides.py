@@ -227,7 +227,7 @@ def test_analyze_uses_default_when_no_override(tmp_db: Path, monkeypatch: pytest
     asyncio.run(_Dummy().analyze(query="hi"))
     kw = create_mock.await_args.kwargs
     assert kw["model"] == "claude-default-model"
-    assert kw["system"][0]["text"] == "DEFAULT_PROMPT"
+    assert kw["system"] == "DEFAULT_PROMPT"
 
 
 def test_analyze_honors_db_override(tmp_db: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -247,7 +247,7 @@ def test_analyze_honors_db_override(tmp_db: Path, monkeypatch: pytest.MonkeyPatc
     asyncio.run(_Dummy().analyze(query="hi"))
     kw = create_mock.await_args.kwargs
     assert kw["model"] == "claude-opus-4-7"
-    assert kw["system"][0]["text"] == "OVERRIDE_PROMPT"
+    assert kw["system"] == "OVERRIDE_PROMPT"
 
 
 def test_analyze_explicit_override_beats_db(tmp_db: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -271,4 +271,4 @@ def test_analyze_explicit_override_beats_db(tmp_db: Path, monkeypatch: pytest.Mo
     )
     kw = create_mock.await_args.kwargs
     assert kw["model"] == "claude-sonnet-4-6"
-    assert kw["system"][0]["text"] == "EXPLICIT_PROMPT"
+    assert kw["system"] == "EXPLICIT_PROMPT"

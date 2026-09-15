@@ -28,12 +28,22 @@ function fmtCost(n: number): string {
 // input (fresh + cache reads + cache writes). cache_creation tokens are billed
 // prompt input too, so they belong in the denominator. The whole system is
 // designed around prompt caching, so this is the key cost signal.
+//
+// The backend computes this as `cache_hit_rate` on every usage rollup, so API
+// consumers and this page share one definition. The local fallback keeps the
+// page working against a backend that predates that field.
 function cacheHitPct(
   u: Pick<
     UsageTotals,
-    "cache_read_input_tokens" | "input_tokens" | "cache_creation_input_tokens"
+    | "cache_read_input_tokens"
+    | "input_tokens"
+    | "cache_creation_input_tokens"
+    | "cache_hit_rate"
   >,
 ): number {
+  if (typeof u.cache_hit_rate === "number") {
+    return Math.round(u.cache_hit_rate * 100);
+  }
   const denom =
     u.cache_read_input_tokens + u.input_tokens + u.cache_creation_input_tokens;
   if (denom <= 0) return 0;

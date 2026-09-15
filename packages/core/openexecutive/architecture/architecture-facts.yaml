@@ -96,6 +96,44 @@ caching:
     Two cache_control blocks (down from four, consolidated in commit c27dcec
     to stay within the Anthropic 4-block API limit alongside any other
     ephemeral markers the request uses).
+  breakpoint_budget: |
+    The budget is FULLY SPENT at four markers per request: the tool block
+    (on the last sorted tool only), the two system blocks, and the rolling
+    message marker. A fifth marker anywhere is a hard API 400 on every chat
+    turn, not a test failure. tests/unit/test_cache_breakpoint_budget.py
+    counts markers across system + tools + messages on a real assembled
+    request and fails above four; it also asserts at least two are present,
+    so a regression that silently stops caching is caught too.
+  minimum_cacheable_length: |
+    Anthropic silently ignores a breakpoint on a prefix shorter than the
+    model minimum (1024 tokens Sonnet/Opus, 2048 Haiku). No error, no cache
+    write, no cache read, and the block bills as ordinary input every call,
+    so a marker on a short prompt advertises caching that never happens.
+    Specialist domain prompts (~600-1100 tokens) and committee reviewer
+    prompts (~230-350) are below the threshold and therefore carry NO
+    marker; they send a bare system string. The triage prompt (~2.6k tokens
+    on the routing model, with the tool block ahead of it in the prefix)
+    does clear the threshold and is cached with a 1h TTL, which matters
+    because triage fires once per monitoring event. The thresholds live as
+    constants in prompts/cache_manager.py and are pinned by
+    tests/unit/test_prompt_cacheability.py in both directions.
+  rolling_message_marker: |
+    Marks the LAST assistant turn in history, which is the boundary of the
+    stable prefix (_build_messages runs before the current user message is
+    appended to the session, so history always ends on an assistant turn).
+    Previously this targeted len(history) - 2 while also requiring an
+    assistant role; with even-length history that index is always a USER
+    turn, so the marker never fired at any conversation depth and the whole
+    conversation prefix was re-sent uncached on every turn.
+  extended_ttl: |
+    The 1h TTL is generally available in the pinned anthropic SDK (0.102.0)
+    via the stable cache_control param, so no beta header is required.
+  measurement: |
+    GET /audit/usage reports cache_hit_rate on every rollup (totals, by_day,
+    by_model, by_source) as cache reads over all billed prompt input. Cache
+    WRITES are in the denominator deliberately, so a workload that keeps
+    re-writing a cache it never reads cannot score as healthy. The UI's
+    /audit/usage page consumes this field rather than recomputing it.
   block_order:
     - id: persona_and_knowledge
       ttl: 1h
@@ -306,15 +344,39 @@ routing:
   pattern: Anthropic tool use with a single `consult_specialist` tool. Multiple parallel tool_use blocks per assistant turn fan out to specialists concurrently.
   parallel_function: openexecutive.orchestrator.router.route_parallel
   fanout_cap: |
-    The number of parallel `consult_specialist` calls dispatched in a single
-    turn is bounded by `MAX_PARALLEL_SPECIALISTS` (config). Default 0 is inert
-    — `router.resolve_fanout_cap` falls back to the specialist roster size,
-    which no real cross-domain turn exceeds. Calls past the cap are not fanned
-    out; each receives a skip tool_result (`router.FANOUT_SKIP_MESSAGE`) so the
-    Executive can re-ask on a later turn. The `routing_decision` debug event
-    carries requested_count / cap / dispatched_count / skipped_count so the
-    fan-out width is observable per turn.
-  retrieval_per_call: Each parallel tool call runs its own domain-filtered ChromaDB query before the specialist sees the question.
+    Bounded twice. `MAX_PARALLEL_SPECIALISTS` (default 3) caps the parallel
+    `consult_specialist` calls dispatched in ONE ITERATION of the agent loop;
+    `MAX_SPECIALIST_CALLS_PER_TURN` (default 8) caps the WHOLE TURN across
+    every iteration. Width alone was not a guardrail — the loop runs up to
+    max_iterations (15) times and re-partitions on each pass, so a
+    per-iteration cap left the per-turn total unbounded. The cap also used to
+    default to 0, which `router.resolve_fanout_cap` treats as inert (falls
+    back to the roster size), so the field read like a limit without being
+    one. Either setting at 0 disables that bound.
+    Calls past a bound are not fanned out; each receives a skip tool_result.
+    `router.FANOUT_SKIP_MESSAGE` covers the width case and points at a
+    follow-up turn; `router.TURN_BUDGET_SKIP_MESSAGE` covers the budget case
+    and instead tells the model to answer with what it already has, because a
+    follow-up turn would meet the same ceiling. The `routing_decision` debug
+    event carries requested_count / cap / dispatched_count / skipped_count so
+    the fan-out width is observable per turn.
+  research_tool_budget_charge: |
+    `run_executive_research` is an ordinary chat tool the Executive can invoke
+    mid-turn, and it runs the whole council synchronously inside the tool loop.
+    It is charged against the turn budget at its real weight via
+    `research_tools.research_turn_budget_weight()` — the research specialist
+    roster plus the synthesis iterations plus the watchlist pass, derived from
+    the workflow constants so it cannot drift. One invocation therefore
+    exhausts the default turn budget on its own, which is the intent: a turn
+    cannot both run the council and fan out widely.
+  retrieval_per_call: |
+    Each parallel tool call runs its own domain-filtered ChromaDB query before
+    the specialist sees the question. Because every consult is its OWN request,
+    retrieval cost multiplies by the fan-out width rather than being shared —
+    two specialists receiving the same chunk are two independent requests, not
+    one redundant payload, so de-duplicating across the fan-out would remove
+    context from the second specialist and save nothing. The levers are the
+    width caps above and the per-collection chunk counts under `knowledge`.
   committee_review: |
     Optional 3-phase response synthesis exposed via
     Executive.stream_chat_with_committee():
@@ -666,6 +728,18 @@ routing:
     carrying the matched term.
 
 knowledge:
+  retrieval_budget: |
+    Per-specialist chunk counts are the per-consult token cost, and all four
+    retrieved collections are now configurable —
+    KNOWLEDGE_BUILTIN_N_RESULTS (5), KNOWLEDGE_COMPANY_N_RESULTS (3),
+    KNOWLEDGE_NOTION_N_RESULTS (3), KNOWLEDGE_RESEARCH_N_RESULTS (2). The
+    notion and research counts were previously hardcoded in
+    knowledge/retriever.py, which left the budget only partly tunable. At the
+    defaults a single consult can carry up to 13 chunks of ~512 words, roughly
+    8-9k tokens, and that multiplies by the fan-out width because each consult
+    is its own request. Setting a count to 0 switches that collection off for
+    retrieval and skips the store query entirely rather than asking for zero
+    rows.
   collections:
     - name: BUILTIN
       what: Curated MBA-style domain knowledge shipped with the repo.
@@ -1415,6 +1489,17 @@ audit:
     - Instrumentation observes only — cache_event reads from `final_msg.usage` AFTER each response. The one request-side touch is a top-level usage-accounting flag (OpenRouter's `usage.include`) added by the translator (`to_openai_request`) so the provider reports `usage.cost`; it leaves the messages and the cache_control system blocks byte-identical, so prompt caching is unaffected. Adding new event types must not modify the system-prompt blocks or message construction, or prompt caching will regress.
 
 external_monitoring:
+  enrichment_model: |
+    Capture-time relevance enrichment runs on ROUTING_MODEL. It fires once per
+    NEW signal on every scan, bounded by EXTERNAL_MONITOR_MAX_SIGNALS_PER_SCAN
+    (default 50) at EXTERNAL_MONITOR_SCAN_INTERVAL_MINUTES (default 5), which
+    makes it the highest-frequency background model call in the system. It
+    previously ran on RESEARCH_MODEL while its own config comment described it
+    as one cheap LLM call per new signal; scoring a single signal against the
+    company profile does not need a reasoning tier. Usage is recorded under
+    the signal_enrichment actor, so its share is visible in the by_source
+    breakdown. EXTERNAL_MONITOR_ENRICHMENT_ENABLED=false stops the calls while
+    leaving signal capture running.
   module: openexecutive.monitoring
   one_liner: Polls external sources and turns detected changes into proposals via the existing alerts pipeline.
   status: |
@@ -2703,6 +2788,16 @@ auth:
     (audit/today filters etc.) can read the same signal.
 
 integrations:
+  email_committee_review: |
+    Committee review on inbound email follows EMAIL_COMMITTEE_REVIEW, default
+    OFF. It was hardcoded on, justified in-code on latency grounds (the extra
+    5-12s is invisible on a 60s poll cycle) with no weighing of cost —
+    committee adds three reviewer calls plus a full revision pass to EVERY
+    inbound email, on a path any sender can trigger, since unrostered senders
+    are deliberately not dropped. The quality argument still holds where it
+    matters, because an email recipient reads the reply with no chance to
+    refine it interactively, so the setting stays available as a deployment
+    choice rather than a default.
   channel_access: |
     Channel access splits into INBOUND (does the message reach the
     Executive at all?) and OUTBOUND (can the Executive reply via the

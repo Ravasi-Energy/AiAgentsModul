@@ -1,6 +1,13 @@
-"""The email poller must default ``committee_review=True`` when invoking
-the Executive on an inbound email. Skipping this would silently route the
-unrevised draft to a real recipient over Gmail.
+"""Committee review on inbound email follows EMAIL_COMMITTEE_REVIEW.
+
+It used to be hardcoded on, justified purely on latency ("the +5-12s does not
+matter on a 60s poll cycle") with no weighing of cost: committee adds three
+reviewer calls plus a full revision pass to EVERY inbound email, on a path any
+sender can trigger since unrostered senders are deliberately not dropped.
+
+The quality argument is real — a recipient reads the reply with no chance to
+refine it — so the setting stays available. It is just a deployment's call
+rather than a default, and these tests pin both directions.
 """
 from __future__ import annotations
 
@@ -21,14 +28,16 @@ class _CapturingExecutive:
         return "ok"
 
 
-def _settings() -> Any:
+def _settings(committee: bool = False) -> Any:
     return SimpleNamespace(
         exec_email_address="exec@example.com",
         email_poll_interval_seconds=60,
+        email_committee_review=committee,
     )
 
 
-def test_run_executive_passes_committee_review_true() -> None:
+def _run(committee: bool) -> dict[str, Any]:
+    """Drive one inbound email and return the kwargs handed to Executive.chat."""
     captured: list[_CapturingExecutive] = []
 
     def _factory(**kwargs: Any) -> _CapturingExecutive:
@@ -50,7 +59,7 @@ def test_run_executive_passes_committee_review_true() -> None:
             "openexecutive.memory.episodic.format_for_prompt",
             new=lambda: "",
         ),
-        patch.object(poller, "get_settings", return_value=_settings()),
+        patch.object(poller, "get_settings", return_value=_settings(committee)),
     ):
         gateway = AsyncMock()
         asyncio.run(
@@ -66,7 +75,16 @@ def test_run_executive_passes_committee_review_true() -> None:
     assert len(captured) == 1
     kwargs = captured[0].chat_kwargs
     assert kwargs is not None
-    assert kwargs.get("committee_review") is True, (
-        "Email poller must default committee_review=True so the reply "
-        "Gmail sees is the reviewed revision, not the raw draft."
-    )
+    return kwargs
+
+
+def test_committee_review_is_off_by_default() -> None:
+    """The expensive path must not be the default on a surface any sender can
+    reach — committee is 3 reviewer calls plus a revision on every email."""
+    assert _run(committee=False).get("committee_review") is False
+
+
+def test_committee_review_is_honoured_when_enabled() -> None:
+    """With the setting on, the reply Gmail sees is the reviewed revision
+    rather than the raw draft."""
+    assert _run(committee=True).get("committee_review") is True

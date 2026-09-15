@@ -409,16 +409,18 @@ async def _run_executive(
         )
 
     executive = Executive(mcp_gateway=gateway)
-    # Default committee review on for inbound email. Emails tend to be
-    # higher-stakes than ad-hoc chat (a recipient is going to read the
-    # reply with no chance to interactively refine it), and the +5–12s
-    # latency does not matter on a 60s poll cycle.
+    # Committee review is opt-in (EMAIL_COMMITTEE_REVIEW). Email is
+    # higher-stakes than ad-hoc chat — the recipient reads the reply with no
+    # chance to refine it — but committee adds 3 reviewer calls and a full
+    # revision pass to every inbound message, on a path any sender can
+    # trigger. That trade is a deployment's to make, not a hardcoded default.
+    settings = get_settings()
     await executive.chat(
         user_message=base_message,
         session=session,
         retrieved_context=retrieve(query=raw_email[:500]),
         episodic_context=format_for_prompt(),
-        committee_review=True,
+        committee_review=settings.email_committee_review,
         person_id=person_id,
         co_present_person_ids=co_present_person_ids or None,
     )

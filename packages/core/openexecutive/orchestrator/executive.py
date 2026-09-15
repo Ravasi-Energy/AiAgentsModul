@@ -60,6 +60,7 @@ from openexecutive.orchestrator.people_tools import (
 from openexecutive.orchestrator.research_tools import (
     RESEARCH_TOOL_HANDLERS,
     RESEARCH_TOOLS,
+    research_turn_budget_weight,
 )
 from openexecutive.orchestrator.router import (
     SPECIALIST_TOOLS,
@@ -365,12 +366,28 @@ class Executive:
         messages: list[dict[str, Any]] = []
         history = session.get_recent_history()
 
+        # Rolling conversation cache: mark the LAST assistant turn, which is
+        # the boundary of the stable prefix. _build_messages runs before the
+        # current user message is appended to the session, so history always
+        # ends on an assistant turn and everything up to and including it is
+        # byte-identical to the previous request — exactly what a cache read
+        # needs. (This previously targeted len(history) - 2 while also
+        # requiring an assistant role; with even-length history that index is
+        # always a USER turn, so the marker never fired and the conversation
+        # prefix was re-sent uncached on every turn.)
+        last_assistant = next(
+            (
+                i
+                for i in range(len(history) - 1, -1, -1)
+                if history[i]["role"] == "assistant"
+            ),
+            None,
+        )
+
         for i, turn in enumerate(history):
             msg: dict[str, Any] = {"role": turn["role"], "content": turn["content"]}
-            # Cache the penultimate assistant turn to build a rolling cache
             if (
-                turn["role"] == "assistant"
-                and i == len(history) - 2
+                i == last_assistant
                 and self._settings.enable_caching
                 and isinstance(turn["content"], str)
             ):
@@ -1092,6 +1109,11 @@ class Executive:
         current_messages = list(messages)
         last_full_text = ""
         specialists_consulted: list[str] = []
+        # Whole-turn specialist ceiling. max_parallel_specialists bounds one
+        # iteration; without this the loop could re-fan-out on each of up to
+        # max_iterations passes. 0 disables the ceiling.
+        turn_budget = self._settings.max_specialist_calls_per_turn
+        specialist_calls_used = 0
 
         for iteration in range(1, max_iterations + 1):
             logger.info(
@@ -1232,13 +1254,19 @@ class Executive:
             # Cap fan-out width per turn (inert by default — cap == roster
             # size). Dispatch the first `cap`; the rest get a skip tool_result
             # the model can react to. See router.partition_specialist_fanout.
+            remaining_budget = (
+                turn_budget - specialist_calls_used if turn_budget > 0 else None
+            )
             run_tool_uses, run_calls, skipped_results, fanout_cap = (
                 partition_specialist_fanout(
                     specialist_tool_uses,
                     specialist_calls,
                     self._settings.max_parallel_specialists,
+                    remaining_budget=remaining_budget,
+                    turn_budget=turn_budget or None,
                 )
             )
+            specialist_calls_used += len(run_calls)
 
             if debug_collector and specialist_calls:
                 evt = debug_collector.emit("routing_decision", {
@@ -1342,6 +1370,15 @@ class Executive:
                     )
 
             if skill_tool_uses:
+                # run_executive_research runs a whole 7-specialist council
+                # synchronously inside this tool loop, so it is charged against
+                # the turn budget at its real weight — otherwise a turn could
+                # run the council AND still fan out to the per-iteration cap.
+                research_uses = sum(
+                    1 for tu in skill_tool_uses if tu["name"] == "run_executive_research"
+                )
+                if research_uses:
+                    specialist_calls_used += research_uses * research_turn_budget_weight()
                 for tu in skill_tool_uses:
                     logger.info("→ skill:%s  input=%s", tu["name"], _trunc(tu["input"]))
                 skill_results = await asyncio.gather(

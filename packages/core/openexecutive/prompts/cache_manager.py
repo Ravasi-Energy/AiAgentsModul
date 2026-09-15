@@ -15,6 +15,22 @@ KNOWLEDGE_INDEX_SUMMARY = """You have access to a curated knowledge base coverin
 
 _VOICE_PERSONA_PLACEHOLDER = "{VOICE_PERSONA}"
 
+# Anthropic ignores cache_control on a prefix shorter than the model's minimum
+# cacheable length. A marker below the threshold is silently a no-op: no error,
+# no cache write, no cache read, and the block bills as ordinary input every
+# call — so a marker on a short prompt looks like caching without being it.
+MIN_CACHEABLE_TOKENS_SONNET_OPUS = 1024
+MIN_CACHEABLE_TOKENS_HAIKU = 2048
+
+# Rough chars-per-token for English prose. Only used to keep prompts on the
+# right side of the thresholds above in tests; never for billing.
+CHARS_PER_TOKEN_ESTIMATE = 3.7
+
+
+def estimate_tokens(text: str) -> int:
+    """Conservative token estimate for cacheability checks only."""
+    return int(len(text) / CHARS_PER_TOKEN_ESTIMATE)
+
 
 def build_system_blocks(
     company_profile: CompanyProfile | None = None,

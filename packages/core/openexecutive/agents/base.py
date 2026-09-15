@@ -124,13 +124,12 @@ class BaseAgent(ABC):
             # the previous per-client timeout, but the provider singleton no
             # longer needs to recreate the SDK client to set it.
             "timeout": _SPECIALIST_TIMEOUT,
-            "system": [
-                {
-                    "type": "text",
-                    "text": system_prompt,
-                    "cache_control": {"type": "ephemeral"},
-                }
-            ],
+            # No cache_control: a domain prompt is ~600-1100 tokens, under
+            # MIN_CACHEABLE_TOKENS_SONNET_OPUS, and the system block is the
+            # whole prefix here (no tools ahead of it on the prose path). A
+            # marker would be silently ignored, so carrying one would only
+            # suggest caching that is not happening.
+            "system": system_prompt,
             "messages": [{"role": "user", "content": user_content}],
         }
 
@@ -227,13 +226,12 @@ class BaseAgent(ABC):
             "model": model,
             "max_tokens": max_tokens,
             "timeout": timeout_seconds,
-            "system": [
-                {
-                    "type": "text",
-                    "text": system_prompt,
-                    "cache_control": {"type": "ephemeral"},
-                }
-            ],
+            # No cache_control: a domain prompt is ~600-1100 tokens, under
+            # MIN_CACHEABLE_TOKENS_SONNET_OPUS, and the system block is the
+            # whole prefix here (no tools ahead of it on the prose path). A
+            # marker would be silently ignored, so carrying one would only
+            # suggest caching that is not happening.
+            "system": system_prompt,
             "tools": tools,
             "messages": [{"role": "user", "content": user_content}],
         }

@@ -264,29 +264,39 @@ def retrieve(
     # Synced Notion wiki — isolated from COMPANY because a Notion share is
     # multi-writer and unreviewed. Ranked below curated company docs and
     # labelled so specialists do not treat it as policy.
-    raw_notion = store.query(
-        query_text=query,
-        collection=ChromaDBStore.NOTION_COLLECTION,
-        domain_filter=effective_domains,
-        n_results=3,
-    )
-    notion_results = [
-        r for r in raw_notion if _passes_threshold(r, distance_threshold)
-    ]
+    n_notion = settings.knowledge_notion_n_results
+    if n_notion > 0:
+        raw_notion = store.query(
+            query_text=query,
+            collection=ChromaDBStore.NOTION_COLLECTION,
+            domain_filter=effective_domains,
+            n_results=n_notion,
+        )
+        notion_results = [
+            r for r in raw_notion if _passes_threshold(r, distance_threshold)
+        ]
+    else:
+        # 0 = collection switched off for this deployment; never ask the store
+        # for zero rows.
+        notion_results = []
 
     # Recent research artifacts — kept in a separate collection and ranked
     # BELOW curated company docs. These are unvetted, web-sourced summaries
     # from executive_research runs, so they are clearly labelled as such and
     # never blended into the company-documents section above.
-    raw_research = store.query(
-        query_text=query,
-        collection=ChromaDBStore.RESEARCH_COLLECTION,
-        domain_filter=None,  # research is cross-domain; never domain-scoped
-        n_results=2,
-    )
-    research_results = [
-        r for r in raw_research if _passes_threshold(r, distance_threshold)
-    ]
+    n_research = settings.knowledge_research_n_results
+    if n_research > 0:
+        raw_research = store.query(
+            query_text=query,
+            collection=ChromaDBStore.RESEARCH_COLLECTION,
+            domain_filter=None,  # research is cross-domain; never domain-scoped
+            n_results=n_research,
+        )
+        research_results = [
+            r for r in raw_research if _passes_threshold(r, distance_threshold)
+        ]
+    else:
+        research_results = []
 
     active_annotations = rs.list_annotations(domains=effective_domains, active_only=True)
 

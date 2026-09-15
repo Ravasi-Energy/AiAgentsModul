@@ -126,15 +126,35 @@ class Settings(BaseSettings):
     )
     knowledge_builtin_n_results: int = Field(5, alias="KNOWLEDGE_BUILTIN_N_RESULTS")
     knowledge_company_n_results: int = Field(3, alias="KNOWLEDGE_COMPANY_N_RESULTS")
+    # Notion and research chunk counts were hardcoded in the retriever, which
+    # left the per-specialist retrieval budget only partly tunable. Each
+    # specialist consult is its OWN request, so these counts multiply by the
+    # fan-out width: at the defaults a specialist can carry up to 13 chunks of
+    # ~512 words (~8-9k tokens), and a 7-way fan-out sends that seven times
+    # over. Lower these to trade retrieved breadth for tokens.
+    knowledge_notion_n_results: int = Field(3, ge=0, alias="KNOWLEDGE_NOTION_N_RESULTS")
+    knowledge_research_n_results: int = Field(
+        2, ge=0, alias="KNOWLEDGE_RESEARCH_N_RESULTS"
+    )
 
-    # Max parallel `consult_specialist` calls dispatched in one chat turn.
-    # 0 (default) is inert: resolve_fanout_cap() falls back to the specialist
-    # roster size, which no real cross-domain turn exceeds. Set a positive
-    # value to bound worst-case turn cost — consult_specialist tool calls past
-    # the cap are skipped with a tool_result the model can react to, instead of
-    # silently fanning out (each specialist call carries its own RAG + memory
-    # prefetch, so unbounded fan-out is the main per-turn cost driver).
-    max_parallel_specialists: int = Field(0, alias="MAX_PARALLEL_SPECIALISTS")
+    # Max parallel `consult_specialist` calls dispatched in ONE ITERATION of
+    # the agent loop. Past the cap, calls get a tool_result the model can react
+    # to rather than silently fanning out. Each specialist call carries its own
+    # RAG + memory prefetch, so fan-out width is the main per-turn cost driver.
+    # 0 is inert (falls back to the roster size) — it read like a guardrail
+    # without being one, so the default is now a real number.
+    max_parallel_specialists: int = Field(3, ge=0, alias="MAX_PARALLEL_SPECIALISTS")
+
+    # Ceiling on specialist consults for a WHOLE TURN, across every iteration.
+    # max_parallel_specialists alone bounds one iteration; the loop runs up to
+    # max_iterations (15) times, so width alone left the per-turn total
+    # unbounded in practice. A run_executive_research invocation is charged at
+    # its true weight (its own 7-specialist fan-out plus synthesis and
+    # watchlist passes), so a turn cannot both research and fan out widely.
+    # 0 disables the ceiling.
+    max_specialist_calls_per_turn: int = Field(
+        8, ge=0, alias="MAX_SPECIALIST_CALLS_PER_TURN"
+    )
 
     # ---- OpenRouter routing --------------------------------------------
     # Toggle that routes Claude calls through OpenRouter (so usage is
@@ -350,6 +370,15 @@ class Settings(BaseSettings):
     # falls back to signing as a person from the company People roster.
     exec_display_name: str = Field("Open Executive", alias="EXEC_DISPLAY_NAME")
     email_poll_interval_seconds: int = Field(60, alias="EMAIL_POLL_INTERVAL_SECONDS")
+
+    # Committee review on inbound email. Previously hardcoded on, justified on
+    # latency grounds ("the +5-12s does not matter on a 60s poll cycle") with
+    # no weighing of cost: it adds 3 reviewer calls plus a full revision pass
+    # to EVERY inbound email, and unrostered senders are deliberately not
+    # dropped, so anyone who knows the address triggers it. Off by default;
+    # turn it on where reply quality on email is worth roughly doubling the
+    # per-email cost.
+    email_committee_review: bool = Field(False, alias="EMAIL_COMMITTEE_REVIEW")
 
     # Telegram + Discord channel access is roster-driven: a sender's
     # channel ID must be present on a non-archived Person row. The old

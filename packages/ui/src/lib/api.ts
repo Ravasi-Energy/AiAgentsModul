@@ -1620,6 +1620,10 @@ export interface UsageTotals {
   // Absent on rows written before searches were recorded.
   web_search_requests?: number;
   cost_usd: number;
+  // Share of prompt input served from cache, 0.0-1.0, computed server-side so
+  // the API and the UI cannot disagree about the definition. Optional because
+  // an older backend will not send it.
+  cache_hit_rate?: number;
 }
 
 export interface UsageByDay extends UsageTotals {

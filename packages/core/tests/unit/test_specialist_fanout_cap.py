@@ -31,9 +31,18 @@ def test_positive_cap_is_honored() -> None:
     assert resolve_fanout_cap(1) == 1
 
 
-def test_config_default_is_zero() -> None:
-    # Guards the inert-by-default contract at the config layer.
-    assert get_settings().max_parallel_specialists == 0
+def test_config_defaults_bound_both_width_and_turn_total() -> None:
+    """The cap used to default to 0 (inert), which read like a guardrail
+    without being one. Width is now bounded per iteration, and the turn has
+    its own ceiling so the loop cannot re-fan-out on every pass."""
+    settings = get_settings()
+    assert settings.max_parallel_specialists > 0
+    assert settings.max_specialist_calls_per_turn > 0
+    # A turn must allow more than one iteration's worth, or multi-round
+    # reasoning is pointless.
+    assert (
+        settings.max_specialist_calls_per_turn > settings.max_parallel_specialists
+    )
 
 
 def test_skip_message_formats_with_cap() -> None:
@@ -83,3 +92,79 @@ def test_partition_run_and_skipped_partition_all_tool_uses() -> None:
     assert len(run_tus) == len(run_calls) == 3
     covered = {t["id"] for t in run_tus} | set(skipped)
     assert covered == {f"id{i}" for i in range(5)}
+
+
+# ---- whole-turn budget ----------------------------------------------------
+
+def test_remaining_budget_narrows_the_cap() -> None:
+    """The turn budget, not the per-iteration width, is the binding limit
+    once earlier iterations have already spent most of it."""
+    tus = [_tu(i) for i in range(5)]
+    calls = [{"specialist": f"s{i}", "query": "q"} for i in range(5)]
+
+    run_tus, run_calls, skipped, cap = partition_specialist_fanout(
+        tus, calls, max_parallel=3, remaining_budget=2, turn_budget=8
+    )
+
+    assert cap == 2
+    assert len(run_tus) == len(run_calls) == 2
+    # Every un-dispatched tool_use still gets a result — Anthropic requires
+    # one result per tool_use.
+    assert len(skipped) == 3
+    assert all("whole specialist budget" in m for m in skipped.values())
+
+
+def test_exhausted_budget_dispatches_nothing_but_still_answers_every_tool_use() -> None:
+    tus = [_tu(i) for i in range(3)]
+    calls = [{"specialist": f"s{i}", "query": "q"} for i in range(3)]
+
+    run_tus, run_calls, skipped, cap = partition_specialist_fanout(
+        tus, calls, max_parallel=3, remaining_budget=0, turn_budget=8
+    )
+
+    assert cap == 0
+    assert run_tus == [] and run_calls == []
+    assert set(skipped) == {tu["id"] for tu in tus}
+
+
+def test_width_stays_binding_when_budget_is_ample() -> None:
+    """A generous budget must not widen fan-out past the per-iteration cap."""
+    tus = [_tu(i) for i in range(5)]
+    calls = [{"specialist": f"s{i}", "query": "q"} for i in range(5)]
+
+    _, run_calls, skipped, cap = partition_specialist_fanout(
+        tus, calls, max_parallel=2, remaining_budget=99, turn_budget=99
+    )
+
+    assert cap == 2
+    assert len(run_calls) == 2
+    # Width-bound, so the message should point at a follow-up turn, not at a
+    # spent budget.
+    assert all("cap=2" in m for m in skipped.values())
+
+
+def test_untracked_budget_preserves_previous_behaviour() -> None:
+    tus = [_tu(i) for i in range(4)]
+    calls = [{"specialist": f"s{i}", "query": "q"} for i in range(4)]
+
+    _, run_calls, _, cap = partition_specialist_fanout(
+        tus, calls, max_parallel=3, remaining_budget=None
+    )
+
+    assert cap == 3
+    assert len(run_calls) == 3
+
+
+def test_research_weight_reflects_the_workflow_shape() -> None:
+    """The charge must track the workflow, not a copied literal."""
+    from openexecutive.orchestrator.research_tools import research_turn_budget_weight
+    from openexecutive.workflows.executive_research import (
+        _MAX_SYNTHESIS_ITERATIONS,
+        active_research_specialists,
+    )
+
+    expected = len(active_research_specialists()) + _MAX_SYNTHESIS_ITERATIONS + 1
+    assert research_turn_budget_weight() == expected
+    # One invocation must exceed the default turn budget on its own, so a turn
+    # that researches cannot also fan out widely.
+    assert research_turn_budget_weight() >= get_settings().max_specialist_calls_per_turn

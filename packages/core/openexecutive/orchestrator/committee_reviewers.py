@@ -113,13 +113,10 @@ class Reviewer:
             msg = await get_provider(self.model).messages_create(
                 model=self.model,
                 max_tokens=1024,
-                system=[
-                    {
-                        "type": "text",
-                        "text": self.system_prompt,
-                        "cache_control": {"type": "ephemeral"},
-                    }
-                ],
+                # No cache_control: a reviewer prompt is ~230-350 tokens,
+                # far under MIN_CACHEABLE_TOKENS_SONNET_OPUS, so a marker here
+                # is a silent no-op rather than a cache.
+                system=self.system_prompt,
                 messages=[{"role": "user", "content": user_content}],
             )
             log_model_usage(msg, model=self.model, actor="committee_reviewer")

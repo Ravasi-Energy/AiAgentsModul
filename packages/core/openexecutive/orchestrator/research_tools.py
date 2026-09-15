@@ -23,6 +23,22 @@ from openexecutive.audit import log_event as audit_log
 logger = logging.getLogger(__name__)
 
 
+def research_turn_budget_weight() -> int:
+    """How many specialist-equivalent calls one research invocation costs.
+
+    The workflow fans out to RESEARCH_SPECIALISTS in parallel, then runs a
+    synthesis tool-loop and a watchlist pass. Charging this against the turn
+    budget stops a single chat turn from both running the council and fanning
+    out widely. Derived from the workflow's own constants so it cannot drift.
+    """
+    from openexecutive.workflows.executive_research import (
+        _MAX_SYNTHESIS_ITERATIONS,
+        active_research_specialists,
+    )
+
+    return len(active_research_specialists()) + _MAX_SYNTHESIS_ITERATIONS + 1
+
+
 RUN_EXECUTIVE_RESEARCH_TOOL: dict[str, Any] = {
     "name": "run_executive_research",
     "description": (

@@ -120,30 +120,59 @@ For cross-domain questions (e.g. "Should we raise a Series B?"), multiple specia
 
 Prompt caching is built in from the start. Cache misses on a busy session cost ~10x more per token.
 
-**Render order** (enforced in `prompts/cache_manager.py`):
+**Render order.** Anthropic caches a *prefix*, so blocks run most-stable-first:
+tool definitions, then system, then messages. The system blocks are built in
+`prompts/cache_manager.py`; the tool block and the rolling message marker are
+attached in `orchestrator/executive.py`.
 
 ```
+[tools]                                  ← cache_control on the LAST tool only
+  ~59 tool definitions, sorted by name      (ephemeral, 1h TTL)
+
 [system]
-  1. Executive persona constant          ← cache_control: ephemeral (1h TTL)
-  2. Company profile block               ← cache_control: ephemeral (1h TTL)
-  3. Knowledge index summary             ← cache_control: ephemeral (1h TTL)
+  block 0: persona + knowledge index      ← cache_control: ephemeral (1h TTL)
+           (one block, not two — the knowledge index is concatenated
+            onto the persona to save a breakpoint slot)
+  block 1: company profile + org context  ← cache_control: ephemeral (5m TTL)
+           (only present when non-empty)
 
 [messages]
   ... conversation history ...
-  penultimate assistant turn             ← cache_control: ephemeral (5m TTL, rolling)
+  last assistant turn                     ← cache_control: ephemeral (5m, rolling)
   current user turn:
     <past_decisions>...</past_decisions>  ← NOT cached (fresh each turn)
     <retrieved_context>...</retrieved_context>  ← NOT cached (fresh each turn)
     user message
 ```
 
+**The breakpoint budget is full.** Anthropic allows **4** `cache_control`
+markers per request and the layout above uses all four: tools, two system
+blocks, and the rolling message marker. A fifth marker anywhere is a hard
+API 400 on every chat turn. `tests/unit/test_cache_breakpoint_budget.py`
+asserts the ceiling against a real assembled request.
+
 **Rules that must never be broken:**
 - No `datetime.now()` in any cached block — time is injected as a user message if needed
 - Tool list sorted by name before every API call
-- Company profile serialized with `sort_keys=True`
+- Company profile rendered as fixed-order Markdown by `CompanyProfile.to_prompt_block()`
+  — deterministic byte-for-byte across calls
 - `EXECUTIVE_PERSONA_PROMPT` is a frozen constant — never f-stringed
 
-Expected cache hit rate: 70–85% of input tokens after the first few turns of a session.
+**Minimum cacheable length.** A breakpoint on a prefix shorter than the
+model's minimum (1024 tokens for Sonnet/Opus, 2048 for Haiku) is *silently
+ignored* — no error, no cache, and the block bills as ordinary input. This is
+why the specialist and committee-reviewer prompts carry no marker: at
+~600-1100 and ~230-350 tokens they are under the threshold, so a marker there
+would advertise caching that never happens. The triage prompt (~2.6k tokens on
+the routing model) does clear it and is cached.
+`tests/unit/test_prompt_cacheability.py` pins both directions.
+
+**Measuring it.** `GET /audit/usage` reports `cache_hit_rate` on every rollup
+(totals, by-day, by-model, by-source), computed from the `cache_read`,
+`input` and `cache_creation` counters recorded per call. Cache *writes* count
+against the rate, so a workload that repeatedly writes a cache it never reads
+does not read as healthy. A steady-state session should sit high; a low rate
+with large `cache_creation` means the prefix is changing between turns.
 
 ---
 

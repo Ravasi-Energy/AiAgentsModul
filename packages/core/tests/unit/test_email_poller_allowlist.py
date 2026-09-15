@@ -40,6 +40,7 @@ def isolated_people_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def _settings() -> Any:
     return SimpleNamespace(
         exec_email_address="exec@example.com",
+        email_committee_review=False,
         email_poll_interval_seconds=60,
     )
 

@@ -167,7 +167,7 @@ def test_test_endpoint_passes_draft_to_analyze(client: TestClient) -> None:
     assert res.json()["response"] == "draft answer"
     kw = create_mock.await_args.kwargs
     assert kw["model"] == "claude-sonnet-5"
-    assert kw["system"][0]["text"] == "DRAFT_PROMPT"
+    assert kw["system"] == "DRAFT_PROMPT"
 
     # And no DB row was written.
     assert client.get("/agents/cso").json()["has_override"] is False

@@ -49,7 +49,11 @@ def isolated_episodic_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pat
 
 
 def _settings() -> Any:
-    return SimpleNamespace(exec_email_address="exec@example.com", email_poll_interval_seconds=60)
+    return SimpleNamespace(
+        exec_email_address="exec@example.com",
+        email_poll_interval_seconds=60,
+        email_committee_review=False,
+    )
 
 
 def _capture_user_message(from_addr: str, raw_email_body: str) -> str:

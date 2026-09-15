@@ -14,7 +14,7 @@ import re
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, computed_field
 
 from openexecutive.audit import AuditLogger, get_audit_logger
 from openexecutive.audit.logger import EVENT_TYPES
@@ -102,6 +102,29 @@ class TokenCounts(BaseModel):
     output_tokens: int
     # Server-side web searches the calls made (0 for rows that predate capture).
     web_search_requests: int = 0
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def cache_hit_rate(self) -> float:
+        """Share of prompt input served from cache, 0.0-1.0.
+
+        Denominator is every prompt-input token the window billed: fresh
+        input, cache reads, and cache WRITES. Writes are counted against the
+        rate deliberately — a write costs more than fresh input, so a workload
+        that keeps re-writing a cache it never reads should not read as
+        healthy. Returns 0.0 when nothing was billed.
+
+        Docs have long advertised a 70-85% target for this figure without
+        anything computing it; this is that number, from rows already logged.
+        """
+        billed_input = (
+            self.input_tokens
+            + self.cache_read_input_tokens
+            + self.cache_creation_input_tokens
+        )
+        if billed_input <= 0:
+            return 0.0
+        return round(self.cache_read_input_tokens / billed_input, 4)
 
 
 class TurnCost(TokenCounts):

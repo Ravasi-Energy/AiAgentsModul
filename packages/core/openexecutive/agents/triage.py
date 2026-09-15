@@ -229,7 +229,18 @@ class TriageAgent(BaseAgent):
             "model": self.effective_model(),
             "max_tokens": 512,
             "timeout": _TRIAGE_TIMEOUT,
-            "system": self.effective_system_prompt(),
+            # Cacheable, unlike the specialist prompts: the triage prompt is
+            # ~2.6k tokens and the tool block sits ahead of it in the prefix,
+            # so it clears MIN_CACHEABLE_TOKENS_HAIKU on the routing model.
+            # Triage fires once per monitoring event, so the prefix is re-sent
+            # constantly — exactly the shape prompt caching is for.
+            "system": [
+                {
+                    "type": "text",
+                    "text": self.effective_system_prompt(),
+                    "cache_control": {"type": "ephemeral", "ttl": "1h"},
+                }
+            ],
             "tools": [TRIAGE_TOOL],
             "tool_choice": {"type": "tool", "name": "emit_alert_decision"},
             "messages": [{"role": "user", "content": user_content}],
