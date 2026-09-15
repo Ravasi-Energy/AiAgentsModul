@@ -18,6 +18,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from openexecutive.audit.usage import log_model_usage
 from openexecutive.memory.episodic import (
     DB_PATH,
     Initiative,
@@ -116,6 +117,8 @@ async def propose_clusters(
             }
         ],
     )
+
+    log_model_usage(response, model=routing_model, actor="initiatives_consolidation")
 
     clusters: list[Cluster] = []
     valid_ids = {i.id for i in initiatives}

@@ -1,7 +1,10 @@
 """Every model call site records a ``cache_event`` usage row: specialist
-consults, specialist tool calls, triage, and the chat memory extractor (the
-Executive's own turns and the research loops are covered by their module
-tests)."""
+consults, specialist tool calls, triage, the chat memory extractor, the
+committee reviewers, and the per-session utility calls (the Executive's own
+turns and the research loops are covered by their module tests).
+
+``test_usage_instrumentation_coverage.py`` enforces that no call site is
+missing; these tests assert the rows carry the right actor and model."""
 from __future__ import annotations
 
 import asyncio
@@ -185,3 +188,78 @@ def test_memory_extractor_records_usage(
     rows = audit.query(event_type="cache_event")
     assert len(rows) == 1 and rows[0].actor == "memory_extractor"
     assert rows[0].details["model"] == "claude-test"
+
+
+def _text_response(text: str, **usage: object) -> SimpleNamespace:
+    return SimpleNamespace(
+        content=[SimpleNamespace(type="text", text=text)],
+        stop_reason="end_turn",
+        usage=SimpleNamespace(**usage),
+    )
+
+
+def test_session_title_records_usage_under_its_own_actor(
+    audit: AuditLogger, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A per-session utility call is cheap but not free — it must be visible."""
+    from openexecutive.utils import session_title
+
+    provider = SimpleNamespace(messages_create=AsyncMock(
+        return_value=_text_response("Pricing strategy", input_tokens=40, output_tokens=4)
+    ))
+    monkeypatch.setattr("openexecutive.providers.get_provider", lambda _m: provider)
+    monkeypatch.setattr(
+        "openexecutive.agents.utility_fast.get_fast_model", lambda: "claude-fast"
+    )
+
+    title = asyncio.run(session_title.generate_session_title("hi", "hello"))
+
+    assert title == "Pricing strategy"
+    rows = audit.query(event_type="cache_event")
+    assert [r.actor for r in rows] == ["session_title"]
+    assert rows[0].details["model"] == "claude-fast"
+    assert rows[0].details["input_tokens"] == 40
+
+
+def test_committee_reviewer_records_usage_per_critique(
+    audit: AuditLogger, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Committee review triples the model calls on a turn; each one is a row."""
+    from openexecutive.orchestrator.committee_reviewers import Reviewer
+
+    provider = SimpleNamespace(messages_create=AsyncMock(
+        return_value=_text_response(
+            '{"severity": "low", "issues": [], "suggestions": []}',
+            input_tokens=120, output_tokens=15,
+        )
+    ))
+    monkeypatch.setattr(
+        "openexecutive.orchestrator.committee_reviewers.get_provider",
+        lambda _m: provider,
+    )
+
+    reviewer = Reviewer(name="quality", system_prompt="judge", model="claude-review")
+    asyncio.run(reviewer.critique("question", "draft"))
+
+    rows = audit.query(event_type="cache_event")
+    assert [r.actor for r in rows] == ["committee_reviewer"]
+    assert rows[0].details["model"] == "claude-review"
+
+
+def test_anthropic_provider_pins_max_retries() -> None:
+    """A retried call is billed but only the final response reports usage, so
+    the retry count governs how far /audit/usage can undercount. Pinning it
+    keeps that knob reviewable; the default matches the SDK, so behavior is
+    unchanged."""
+    import anthropic
+
+    from openexecutive.providers.anthropic_provider import AnthropicProvider
+
+    provider = AnthropicProvider(api_key="sk-test", max_retries=0)
+    assert provider._client.max_retries == 0
+
+    # Omitted -> the SDK's own default still applies (no behavior change).
+    # Compare against the SDK rather than pinning a literal, so an upstream
+    # bump is not a spurious failure in this repo.
+    sdk_default = anthropic.AsyncAnthropic(api_key="sk-test").max_retries
+    assert AnthropicProvider(api_key="sk-test")._client.max_retries == sdk_default

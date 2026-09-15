@@ -12,6 +12,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from openexecutive.agents.base import BaseAgent
+from openexecutive.audit.usage import log_model_usage
 from openexecutive.providers import get_provider
 
 logger = logging.getLogger(__name__)
@@ -183,10 +184,14 @@ class AlertReviewAgent(BaseAgent):
 
     async def review(self, batch_context: str) -> list[AlertVerdict]:
         """Return verdicts for one batch; empty on any failure (never raises)."""
-        provider = get_provider(self.effective_model())
+        # Resolve once: effective_model() consults the override cache (SQLite
+        # on a miss), so re-reading it after the try would re-open a raise path
+        # in a method documented to never raise.
+        model = self.effective_model()
+        provider = get_provider(model)
         try:
             message = await provider.messages_create(
-                model=self.effective_model(),
+                model=model,
                 max_tokens=_MAX_TOKENS,
                 timeout=_REVIEW_TIMEOUT,
                 system=self.effective_system_prompt(),
@@ -197,6 +202,7 @@ class AlertReviewAgent(BaseAgent):
         except Exception:
             logger.exception("alert_review: model call failed — no verdicts this batch")
             return []
+        log_model_usage(message, model=model, actor="alert_review")
         for block in getattr(message, "content", []) or []:
             if getattr(block, "type", "") == "tool_use" and getattr(block, "name", "") == "emit_alert_reviews":
                 return parse_verdicts(getattr(block, "input", {}))

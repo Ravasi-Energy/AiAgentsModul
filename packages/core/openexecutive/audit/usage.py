@@ -1,23 +1,40 @@
 """Per-call model usage recording.
 
-Every model call the system makes (Executive chat turns, specialist consults
-and workflow specialist steps, specialist research, the research synthesis
-and watchlist passes, triage, the chat memory extractor, the Council test
-boxes) records one ``cache_event`` audit row through
-:func:`log_model_usage` — tokens, cache hits, provider-reported cost, and the
-server-side web searches the call made. ``GET /audit/usage`` and the
+Every model call the system makes records one ``cache_event`` audit row
+through :func:`log_model_usage` — tokens, cache hits, provider-reported cost,
+and the server-side web searches the call made. ``GET /audit/usage`` and the
 per-session cost view sum those rows, so a run's weight can be read from the
 audit log instead of guessed.
+``tests/unit/test_usage_instrumentation_coverage.py`` enforces the coverage:
+it walks the package with ``ast`` and fails on a provider call that reaches no
+usage helper, so an uninstrumented call site cannot land silently.
 
-The ``actor`` column names the source of the call (``executive``,
-``specialist`` for chat-turn consults, ``specialist_workflow`` for workflow
-steps, ``specialist_mcp`` for the MCP consult tool, ``specialist_research``,
-``research_synthesis``, ``research_watchlist``, ``triage``,
-``memory_extractor``, ``agent_test`` for the Council test boxes), which is
-what the per-source breakdown groups on. A research run binds its
-``run_id`` in a ContextVar for its
-duration so every row the run produces carries it in ``details``; the
-workflow then rolls those rows up into the ``usage`` block on its result.
+The ``actor`` column names the source of the call, which is what the
+per-source breakdown groups on:
+
+- chat turn — ``executive``, ``specialist`` (chat-turn consults),
+  ``committee_reviewer`` (the three critique passes), ``committee_revision``
+  (the post-review rewrite), ``memory_extractor``, ``session_title``,
+  ``suggested_prompts``
+- specialists off the chat path — ``specialist_workflow`` (workflow steps),
+  ``specialist_mcp`` (the MCP consult tool), ``specialist_research``
+- research — ``research_synthesis``, ``research_watchlist``
+- background / scheduled — ``briefing_narrative`` (the /today narrative and
+  the morning brief, which share one synthesizer), ``eod_digest`` (the
+  end-of-day digest, which has its own prompt and call site),
+  ``reflection``, ``alert_review``, ``person_insights``,
+  ``signal_enrichment``, ``triage``
+- integrations — ``response_gate`` (Slack/Discord thread replies),
+  ``inbound_resolver``, ``wait_for_human``
+- tooling, not operational spend — ``agent_test`` (the Council test boxes),
+  ``eval_judge``, ``fixture_generator``, ``initiatives_consolidation``, and
+  ``architecture_generator`` (instrumented for completeness but off the
+  runtime path: the /architecture page is served from static prebuilt JSON,
+  so this actor should not appear in a running deployment)
+
+A research run binds its ``run_id`` in a ContextVar for its duration so every
+row the run produces carries it in ``details``; the workflow then rolls those
+rows up into the ``usage`` block on its result.
 """
 from __future__ import annotations
 

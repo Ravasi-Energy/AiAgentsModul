@@ -30,6 +30,7 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, Field, ValidationError
 
+from openexecutive.audit.usage import log_model_usage
 from openexecutive.memory.company_profile import CompanyProfile
 from openexecutive.people.models import AuthorityScope
 
@@ -743,6 +744,9 @@ async def _generate_bundle(
             tools=[tool],
             tool_choice={"type": "tool", "name": "emit_fixture"},
             messages=messages,
+        )
+        log_model_usage(
+            response, model=resolved_model, actor="fixture_generator", iteration=attempt + 1
         )
         raw = _extract_tool_input(response)
         try:

@@ -287,7 +287,9 @@ def _anthropic() -> AnthropicProvider:
                     "at a configured local model."
                 ),
             )
-        _anthropic_provider = AnthropicProvider(api_key=api_key)
+        _anthropic_provider = AnthropicProvider(
+            api_key=api_key, max_retries=settings.anthropic_max_retries
+        )
     return _anthropic_provider
 
 

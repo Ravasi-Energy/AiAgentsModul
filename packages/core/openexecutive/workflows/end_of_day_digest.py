@@ -25,6 +25,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from openexecutive.audit.usage import log_model_usage
 from openexecutive.knowledge.store import ChromaDBStore
 from openexecutive.workflows.base import (
     Workflow,
@@ -309,6 +310,7 @@ class EndOfDayDigestWorkflow(Workflow):
                 system=_EOD_DIGEST_SYSTEM,
                 messages=[{"role": "user", "content": user_content}],
             )
+            log_model_usage(response, model=model, actor="eod_digest")
             text_blocks = [b for b in response.content if getattr(b, "type", "") == "text"]
             artifact_text = text_blocks[0].text.strip() if text_blocks else ""
         except Exception as exc:

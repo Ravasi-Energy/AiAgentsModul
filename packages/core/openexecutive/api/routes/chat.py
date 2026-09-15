@@ -806,6 +806,7 @@ async def _generate_prompts_via_llm(
     import json as _json
 
     from openexecutive.agents.utility_fast import get_fast_model
+    from openexecutive.audit.usage import log_model_usage
     from openexecutive.config import get_settings
     from openexecutive.providers import get_provider
 
@@ -820,6 +821,7 @@ async def _generate_prompts_via_llm(
             ),
             timeout=get_settings().utility_fast_timeout_s,
         )
+        log_model_usage(response, model=model, actor="suggested_prompts")
         text_blocks = [b for b in response.content if getattr(b, "type", "") == "text"]
         raw = text_blocks[0].text.strip() if text_blocks else ""
         if raw.startswith("```"):

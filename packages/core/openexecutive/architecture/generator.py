@@ -19,6 +19,7 @@ import httpx
 from openexecutive.architecture.cache import SectionContent, utc_now_iso
 from openexecutive.architecture.facts import FactsBundle
 from openexecutive.architecture.sections import SectionSpec
+from openexecutive.audit.usage import log_model_usage
 from openexecutive.providers import get_provider
 
 logger = logging.getLogger(__name__)
@@ -240,6 +241,9 @@ async def generate_section(spec: SectionSpec, bundle: FactsBundle) -> SectionCon
                 raise
             continue
 
+        log_model_usage(
+            resp, model=_MODEL, actor="architecture_generator", iteration=attempt + 1
+        )
         text = "".join(
             getattr(block, "text", "")
             for block in resp.content
@@ -321,6 +325,22 @@ async def stream_generate_section(
                 chunk = event.delta.text
                 buf.append(chunk)
                 yield {"type": "delta", "text": chunk}
+
+        try:
+            final_msg = await stream.get_final_message()
+        except Exception:
+            # Provider variance — some adapters do not implement
+            # get_final_message once the stream has been iterated. An
+            # audit-only branch must never break generation, but a silent
+            # miss here is exactly the blind spot the usage rows exist to
+            # close, so say so.
+            logger.warning(
+                "architecture.generate.usage_unrecorded section=%s — "
+                "get_final_message unavailable after streaming",
+                spec.id,
+            )
+        else:
+            log_model_usage(final_msg, model=_MODEL, actor="architecture_generator")
 
     raw = "".join(buf)
     try:

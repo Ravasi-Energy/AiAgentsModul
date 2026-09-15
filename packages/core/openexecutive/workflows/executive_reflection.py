@@ -36,6 +36,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from openexecutive.audit.usage import log_model_usage
 from openexecutive.knowledge.store import ChromaDBStore
 from openexecutive.workflows.base import (
     Workflow,
@@ -554,6 +555,9 @@ class ExecutiveReflectionWorkflow(Workflow):
                     )
                     return
 
+                log_model_usage(
+                    response, model=model, actor="reflection", iteration=iteration
+                )
                 iter_summaries = await _execute_tool_calls(response, _ALL_SKILL_HANDLERS)
                 tool_call_summaries.extend(iter_summaries)
 

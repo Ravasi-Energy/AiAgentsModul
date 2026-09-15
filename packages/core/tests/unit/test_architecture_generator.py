@@ -5,8 +5,11 @@ No real Anthropic/OpenRouter calls — the streaming test mocks the provider.
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+
+import pytest
 
 from openexecutive.architecture.facts import FactsBundle
 from openexecutive.architecture.generator import (
@@ -47,8 +50,16 @@ class _FakeStream:
     (content_block_delta events) — deliberately NOT the SDK-only
     `text_stream` attribute the generator used to depend on."""
 
-    def __init__(self, events: list) -> None:
+    def __init__(self, events: list, final_message: object | None = None) -> None:
         self._events = events
+        self._final_message = final_message
+
+    async def get_final_message(self) -> object:
+        # Adapters vary: some do not implement this once the stream has been
+        # iterated. None models that variance so both branches are testable.
+        if self._final_message is None:
+            raise AttributeError("get_final_message unavailable after iteration")
+        return self._final_message
 
     async def __aenter__(self) -> _FakeStream:
         return self
@@ -162,3 +173,75 @@ def test_bad_output_content_truncates() -> None:
     # The truncation budget is 1200 chars; the rendered markdown must
     # not include all 5000.
     assert len(out.markdown) < 2000
+
+
+def test_stream_generate_section_records_usage_when_available(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The streaming path must emit a cache_event row, not silently skip it.
+
+    Regression guard: the first version of this instrumentation swallowed a
+    missing get_final_message, and the only stream stub in the suite lacked
+    that method — so the call site logged nothing and every test still passed.
+    """
+    from openexecutive.audit.logger import AuditLogger, set_audit_logger
+
+    audit = AuditLogger(tmp_path / "audit.db")
+    set_audit_logger(audit)
+    try:
+        final = SimpleNamespace(
+            stop_reason="end_turn",
+            usage=SimpleNamespace(input_tokens=310, output_tokens=64),
+        )
+        events = [_text_delta('{"markdown": "Hi", "mermaid": null}')]
+        fake_provider = SimpleNamespace(
+            messages_stream=lambda **_kw: _FakeStream(events, final_message=final)
+        )
+        monkeypatch.setattr(
+            "openexecutive.architecture.generator.get_provider",
+            lambda _m: fake_provider,
+        )
+
+        async def _drain() -> None:
+            async for _ in stream_generate_section(get_section("overview"), _bundle()):
+                pass
+
+        asyncio.run(_drain())
+
+        rows = audit.query(event_type="cache_event")
+        assert [r.actor for r in rows] == ["architecture_generator"]
+        assert rows[0].details["input_tokens"] == 310
+    finally:
+        set_audit_logger(None)
+
+
+def test_stream_generate_section_survives_missing_get_final_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An adapter without get_final_message must still generate — the usage
+    row is best-effort, never a hard dependency of the content path."""
+    from openexecutive.audit.logger import AuditLogger, set_audit_logger
+
+    audit = AuditLogger(tmp_path / "audit.db")
+    set_audit_logger(audit)
+    try:
+        events = [_text_delta('{"markdown": "Hi", "mermaid": null}')]
+        fake_provider = SimpleNamespace(
+            messages_stream=lambda **_kw: _FakeStream(events)  # no final message
+        )
+        monkeypatch.setattr(
+            "openexecutive.architecture.generator.get_provider",
+            lambda _m: fake_provider,
+        )
+
+        async def _collect() -> list[dict]:
+            return [
+                ev
+                async for ev in stream_generate_section(get_section("overview"), _bundle())
+            ]
+
+        out = asyncio.run(_collect())
+        assert out[-1]["type"] == "done"
+        assert audit.query(event_type="cache_event") == []
+    finally:
+        set_audit_logger(None)

@@ -80,6 +80,7 @@ def _catalog_settings(**overrides: Any) -> Any:
 def _registry_settings(*, enabled: bool) -> Any:
     return SimpleNamespace(
         anthropic_api_key="sk-test",
+        anthropic_max_retries=2,
         openrouter_enabled=enabled,
         openrouter_api_key="sk-or-test",
         openrouter_base_url="https://openrouter.example/api/v1",

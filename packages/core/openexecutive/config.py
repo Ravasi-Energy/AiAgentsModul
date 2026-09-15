@@ -89,6 +89,14 @@ class Settings(BaseSettings):
     # while this is unset.
     anthropic_api_key: str | None = Field(None, alias="ANTHROPIC_API_KEY")
 
+    # The Anthropic SDK retries 429/5xx twice by default. Each retry is a
+    # billed request, but only the final response carries the usage block we
+    # record — so retry spend is invisible in /audit/usage. Pinning it does
+    # not change that today (2 is the SDK default); it makes the knob
+    # reviewable and lets a deployment trade retry resilience against how
+    # far the cost view can undercount during an overload.
+    anthropic_max_retries: int = Field(2, ge=0, le=10, alias="ANTHROPIC_MAX_RETRIES")
+
     default_model: str = Field("claude-sonnet-5", alias="DEFAULT_MODEL")
     deep_reasoning_model: str = Field("claude-opus-5", alias="DEEP_REASONING_MODEL")
     routing_model: str = Field("claude-haiku-4-5", alias="ROUTING_MODEL")

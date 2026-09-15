@@ -169,6 +169,7 @@ def _settings_stub(
 ) -> Any:
     return SimpleNamespace(
         anthropic_api_key=anthropic_key,
+        anthropic_max_retries=2,
         openrouter_enabled=enabled,
         openrouter_api_key=key,
         openrouter_base_url="https://openrouter.ai/api/v1",

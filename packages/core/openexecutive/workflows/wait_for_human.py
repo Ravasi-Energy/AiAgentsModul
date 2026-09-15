@@ -114,6 +114,7 @@ async def parse_decision(text: str, expected_shape: str) -> dict[str, Any]:
     fallback = _FALLBACKS.get(expected_shape, {"text": ""})
 
     try:
+        from openexecutive.audit.usage import log_model_usage
         from openexecutive.config import get_settings
         from openexecutive.providers import get_provider
 
@@ -135,6 +136,7 @@ async def parse_decision(text: str, expected_shape: str) -> dict[str, Any]:
                 }
             ],
         )
+        log_model_usage(response, model=model, actor="wait_for_human")
         # The SDK only emits text blocks for this prompt (no tools, no
         # thinking). The union-attr complaint mypy raises here is a false
         # positive at runtime; suppress rather than narrowing because the
