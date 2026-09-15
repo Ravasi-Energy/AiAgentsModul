@@ -148,12 +148,17 @@ class Settings(BaseSettings):
     # Ceiling on specialist consults for a WHOLE TURN, across every iteration.
     # max_parallel_specialists alone bounds one iteration; the loop runs up to
     # max_iterations (15) times, so width alone left the per-turn total
-    # unbounded in practice. A run_executive_research invocation is charged at
-    # its true weight (its own 7-specialist fan-out plus synthesis and
-    # watchlist passes), so a turn cannot both research and fan out widely.
-    # 0 disables the ceiling.
+    # unbounded in practice.
+    #
+    # A run_executive_research invocation is charged at its true weight — its
+    # own specialist fan-out plus the synthesis and watchlist passes, 11 at the
+    # current defaults (see research_tools.research_turn_budget_weight). The
+    # default here is deliberately just above that so a turn CAN research and
+    # then ask one follow-up specialist; at 8 it could not ask any, which is a
+    # sharper cut than intended. Set it below the research weight to make
+    # research exclusive, or to 0 to disable the ceiling entirely.
     max_specialist_calls_per_turn: int = Field(
-        8, ge=0, alias="MAX_SPECIALIST_CALLS_PER_TURN"
+        12, ge=0, alias="MAX_SPECIALIST_CALLS_PER_TURN"
     )
 
     # ---- OpenRouter routing --------------------------------------------

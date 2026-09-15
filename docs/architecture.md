@@ -139,6 +139,8 @@ attached in `orchestrator/executive.py`.
 [messages]
   ... conversation history ...
   last assistant turn                     ← cache_control: ephemeral (5m, rolling)
+                                            (omitted once the 20-turn history
+                                             window starts sliding — see below)
   current user turn:
     <past_decisions>...</past_decisions>  ← NOT cached (fresh each turn)
     <retrieved_context>...</retrieved_context>  ← NOT cached (fresh each turn)
@@ -157,6 +159,15 @@ asserts the ceiling against a real assembled request.
 - Company profile rendered as fixed-order Markdown by `CompanyProfile.to_prompt_block()`
   — deterministic byte-for-byte across calls
 - `EXECUTIVE_PERSONA_PROMPT` is a frozen constant — never f-stringed
+
+**The rolling marker stands down on long sessions.** `get_recent_history`
+keeps the last 20 exchanges. Past that the window *slides* — the oldest
+exchange is dropped every turn — so `messages[0]` changes and the cached
+prefix can never match. Marking it there would buy a guaranteed cache *write*
+(billed above plain input) with no possible read, on exactly the long sessions
+that cost the most, so the marker is omitted while the window is sliding
+(`Session.history_window_is_stable`). Making long sessions cacheable would
+need a window anchored to a fixed start rather than a sliding one.
 
 **Minimum cacheable length.** A breakpoint on a prefix shorter than the
 model's minimum (1024 tokens for Sonnet/Opus, 2048 for Haiku) is *silently

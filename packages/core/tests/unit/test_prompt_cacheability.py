@@ -66,11 +66,77 @@ def test_domain_prompts_are_below_the_threshold_and_uncached(prompt: str) -> Non
     assert estimate_tokens(prompt) < MIN_CACHEABLE_TOKENS_SONNET_OPUS
 
 
-def test_specialist_calls_send_a_bare_system_prompt() -> None:
-    """A marker must not creep back onto the specialist path without the
-    prompt first growing past the threshold above."""
+def test_specialist_path_has_no_hardcoded_marker() -> None:
+    """base.py must not hand-roll a cache_control dict — it routes through
+    build_cacheable_system so the threshold is measured per prompt and model.
+    committee_reviewers sends bare (its prompts are ~230-350 tokens)."""
     from openexecutive.agents import base
     from openexecutive.orchestrator import committee_reviewers
 
     assert _cache_control_keys(base) == 0
     assert _cache_control_keys(committee_reviewers) == 0
+
+
+# ---- cacheability is measured, not asserted in a comment -------------------
+
+def test_short_prompt_sends_bare() -> None:
+    from openexecutive.prompts.cache_manager import build_cacheable_system
+
+    assert build_cacheable_system(CSO_PROMPT, "claude-opus-5") == CSO_PROMPT
+
+
+def test_prompt_over_the_threshold_is_cached() -> None:
+    """TALENT_PROMPT is ~1087 tokens — above the Sonnet/Opus minimum. A blanket
+    'domain prompts are too short' rule would have silently stopped caching it."""
+    from openexecutive.prompts.cache_manager import build_cacheable_system
+    from openexecutive.prompts.domain_prompts import TALENT_PROMPT
+
+    block = build_cacheable_system(TALENT_PROMPT, "claude-opus-5")
+    assert isinstance(block, list)
+    assert block[0]["cache_control"] == {"type": "ephemeral"}
+
+
+def test_haiku_needs_double_the_prefix() -> None:
+    """Haiku's minimum is 2048, so a prompt that caches on Opus may not here."""
+    from openexecutive.prompts.cache_manager import build_cacheable_system
+    from openexecutive.prompts.domain_prompts import TALENT_PROMPT
+
+    assert isinstance(build_cacheable_system(TALENT_PROMPT, "claude-opus-5"), list)
+    assert build_cacheable_system(TALENT_PROMPT, "claude-haiku-4-5") == TALENT_PROMPT
+
+
+def test_tool_definitions_count_toward_the_prefix() -> None:
+    """Tools sit AHEAD of the system block in the cached prefix, so they push a
+    short prompt over the minimum. The tools path and the prose path therefore
+    reach different answers for the same prompt — which is why the earlier
+    blanket comment (copied to both) was wrong."""
+    from openexecutive.prompts.cache_manager import build_cacheable_system
+
+    assert build_cacheable_system(CSO_PROMPT, "claude-opus-5") == CSO_PROMPT
+    with_tools = build_cacheable_system(
+        CSO_PROMPT, "claude-opus-5", prefix_tokens=1000
+    )
+    assert isinstance(with_tools, list)
+
+
+def test_long_operator_override_regains_caching() -> None:
+    """effective_system_prompt() can return an operator override of any length.
+    A hardcoded 'too short' rule would strand a 5k-token custom prompt with no
+    caching and no way to re-enable it."""
+    from openexecutive.prompts.cache_manager import build_cacheable_system
+
+    override = "You are a custom executive. " * 400
+    assert isinstance(build_cacheable_system(override, "claude-opus-5"), list)
+
+
+def test_ttl_is_only_emitted_when_requested() -> None:
+    from openexecutive.prompts.cache_manager import build_cacheable_system
+    from openexecutive.prompts.triage_prompt import TRIAGE_PROMPT
+
+    default = build_cacheable_system(TRIAGE_PROMPT, "claude-haiku-4-5")
+    assert isinstance(default, list)
+    assert "ttl" not in default[0]["cache_control"]
+
+    hour = build_cacheable_system(TRIAGE_PROMPT, "claude-haiku-4-5", ttl="1h")
+    assert isinstance(hour, list)
+    assert hour[0]["cache_control"]["ttl"] == "1h"

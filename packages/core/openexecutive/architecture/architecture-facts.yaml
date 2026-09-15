@@ -118,13 +118,21 @@ caching:
     constants in prompts/cache_manager.py and are pinned by
     tests/unit/test_prompt_cacheability.py in both directions.
   rolling_message_marker: |
-    Marks the LAST assistant turn in history, which is the boundary of the
-    stable prefix (_build_messages runs before the current user message is
-    appended to the session, so history always ends on an assistant turn).
-    Previously this targeted len(history) - 2 while also requiring an
-    assistant role; with even-length history that index is always a USER
-    turn, so the marker never fired at any conversation depth and the whole
+    Marks the last assistant turn in history that can carry a marker, which is
+    the boundary of the stable prefix (_build_messages runs before the current
+    user message is appended to the session, so history ends on an assistant
+    turn). Previously this targeted len(history) - 2 while also requiring an
+    assistant role; with even-length history that index is always a USER turn,
+    so the marker never fired at any conversation depth and the whole
     conversation prefix was re-sent uncached on every turn.
+    Two guards keep the marker from costing more than it saves. It stands down
+    once the history window starts sliding — past MAX_HISTORY_TURNS exchanges
+    get_recent_history drops the oldest pair every turn, so messages[0] changes
+    and the prefix can never match; marking it there buys a guaranteed cache
+    WRITE, billed above plain input, with no possible read, on exactly the long
+    sessions that cost most (Session.history_window_is_stable). And it walks
+    back past structured (list) assistant content to the newest string turn, so
+    a list-valued last turn degrades to partial caching rather than none.
   extended_ttl: |
     The 1h TTL is generally available in the pinned anthropic SDK (0.102.0)
     via the stable cache_control param, so no beta header is required.
@@ -346,7 +354,7 @@ routing:
   fanout_cap: |
     Bounded twice. `MAX_PARALLEL_SPECIALISTS` (default 3) caps the parallel
     `consult_specialist` calls dispatched in ONE ITERATION of the agent loop;
-    `MAX_SPECIALIST_CALLS_PER_TURN` (default 8) caps the WHOLE TURN across
+    `MAX_SPECIALIST_CALLS_PER_TURN` (default 12) caps the WHOLE TURN across
     every iteration. Width alone was not a guardrail — the loop runs up to
     max_iterations (15) times and re-partitions on each pass, so a
     per-iteration cap left the per-turn total unbounded. The cap also used to
@@ -366,9 +374,13 @@ routing:
     It is charged against the turn budget at its real weight via
     `research_tools.research_turn_budget_weight()` — the research specialist
     roster plus the synthesis iterations plus the watchlist pass, derived from
-    the workflow constants so it cannot drift. One invocation therefore
-    exhausts the default turn budget on its own, which is the intent: a turn
-    cannot both run the council and fan out widely.
+    the workflow constants so it cannot drift (11 at the defaults). The charge
+    is applied BEFORE the specialist partition in the same iteration body —
+    applying it afterwards let the FIRST iteration run the council and still
+    fan out to the per-iteration cap, since both blocks live in one loop pass.
+    The turn ceiling sits just above the research weight on purpose, so a turn
+    can research and then ask one follow-up specialist; at a ceiling below the
+    weight it could not ask any, which is a sharper cut than intended.
   retrieval_per_call: |
     Each parallel tool call runs its own domain-filtered ChromaDB query before
     the specialist sees the question. Because every consult is its OWN request,

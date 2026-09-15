@@ -165,6 +165,44 @@ def test_research_weight_reflects_the_workflow_shape() -> None:
 
     expected = len(active_research_specialists()) + _MAX_SYNTHESIS_ITERATIONS + 1
     assert research_turn_budget_weight() == expected
-    # One invocation must exceed the default turn budget on its own, so a turn
-    # that researches cannot also fan out widely.
-    assert research_turn_budget_weight() >= get_settings().max_specialist_calls_per_turn
+    # It must be a real charge, not a token one: research has to consume most
+    # of a turn's budget so a turn cannot both run the council and fan out
+    # widely. (It must not consume ALL of it — see the follow-up test below.)
+    assert research_turn_budget_weight() > get_settings().max_parallel_specialists
+
+
+def test_turn_budget_accommodates_research_plus_a_follow_up() -> None:
+    """The default used to be 8 while one research invocation weighs 11, so any
+    research turn overdrew the budget and EVERY later consult was hard-skipped.
+    "cannot fan out widely" was really "cannot fan out at all"."""
+    from openexecutive.orchestrator.research_tools import research_turn_budget_weight
+
+    budget = get_settings().max_specialist_calls_per_turn
+    assert budget > research_turn_budget_weight(), (
+        "A turn that runs the research council must be able to ask at least "
+        "one follow-up specialist."
+    )
+
+
+def test_skip_message_reads_correctly_without_a_budget_size() -> None:
+    """turn_budget is presentational and optional. Omitting it must not
+    interpolate 'None' into a tool_result the model reads."""
+    tus = [_tu(i) for i in range(2)]
+    calls = [{"specialist": f"s{i}", "query": "q"} for i in range(2)]
+
+    _, _, skipped, _ = partition_specialist_fanout(
+        tus, calls, max_parallel=3, remaining_budget=0
+    )
+
+    assert skipped
+    for msg in skipped.values():
+        assert "None" not in msg
+        assert "whole specialist budget" in msg
+
+
+def test_skip_message_includes_the_budget_when_known() -> None:
+    _, _, skipped, _ = partition_specialist_fanout(
+        [_tu(0)], [{"specialist": "cso", "query": "q"}],
+        max_parallel=3, remaining_budget=0, turn_budget=12,
+    )
+    assert all("12 consultations" in m for m in skipped.values())

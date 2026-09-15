@@ -32,6 +32,50 @@ def estimate_tokens(text: str) -> int:
     return int(len(text) / CHARS_PER_TOKEN_ESTIMATE)
 
 
+def min_cacheable_tokens(model: str) -> int:
+    """Minimum cacheable prefix for ``model``. Haiku's is double the rest."""
+    return MIN_CACHEABLE_TOKENS_HAIKU if "haiku" in model.lower() else (
+        MIN_CACHEABLE_TOKENS_SONNET_OPUS
+    )
+
+
+def build_cacheable_system(
+    system_prompt: str,
+    model: str,
+    *,
+    prefix_tokens: int = 0,
+    ttl: str | None = None,
+) -> str | list[dict[str, Any]]:
+    """A system value that carries ``cache_control`` only when it would work.
+
+    Anthropic silently ignores a breakpoint on a prefix below the model's
+    minimum — no error, no cache, and the block bills as ordinary input — so a
+    marker on a short prompt advertises caching that never happens. Rather than
+    asserting a prompt-size range in a comment (which goes stale the moment a
+    prompt is edited or an operator sets a long override), measure it.
+
+    ``prefix_tokens`` is anything that precedes the system block in the cached
+    prefix — chiefly tool definitions, which count toward the minimum. Returns a
+    bare string when the prefix is too short, so callers can pass the result
+    straight through as ``system``.
+    """
+    if estimate_tokens(system_prompt) + prefix_tokens < min_cacheable_tokens(model):
+        return system_prompt
+    cache_control: dict[str, Any] = {"type": "ephemeral"}
+    if ttl is not None:
+        cache_control["ttl"] = ttl
+    return [{"type": "text", "text": system_prompt, "cache_control": cache_control}]
+
+
+def estimate_tools_tokens(tools: list[dict[str, Any]] | None) -> int:
+    """Rough token cost of serialised tool definitions, for prefix sizing."""
+    if not tools:
+        return 0
+    import json
+
+    return estimate_tokens(json.dumps(tools, sort_keys=True))
+
+
 def build_system_blocks(
     company_profile: CompanyProfile | None = None,
     mcp_enabled: bool = False,

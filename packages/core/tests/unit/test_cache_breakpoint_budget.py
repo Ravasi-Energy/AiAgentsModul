@@ -204,3 +204,74 @@ def test_marker_is_absent_when_caching_is_disabled() -> None:
         asyncio.run(_go())
 
     assert _count_markers(captured.get("messages")) == 0
+
+
+# ---- the marker must stand down when it cannot possibly hit ----------------
+
+def _drive(session: Session, message: str = "next") -> dict[str, Any]:
+    captured: dict[str, Any] = {}
+
+    class _Provider:
+        def messages_stream(self, **kwargs: Any) -> _Stream:
+            captured.update(kwargs)
+            return _Stream()
+
+    with patch(
+        "openexecutive.orchestrator.executive.get_provider",
+        return_value=_Provider(),
+    ):
+
+        async def _go() -> None:
+            async for _ in Executive().stream_chat(
+                user_message=message, session=session
+            ):
+                pass
+
+        asyncio.run(_go())
+    return captured
+
+
+def test_no_marker_once_the_history_window_starts_sliding() -> None:
+    """Regression: re-activating the rolling marker made long sessions WORSE.
+
+    get_recent_history keeps the last MAX_HISTORY_TURNS exchanges. Past that the
+    window slides — the oldest exchange is dropped every turn, so messages[0]
+    changes and the cached prefix can never match. Marking it then buys a
+    guaranteed cache WRITE (billed above plain input) with no possible read, on
+    exactly the long sessions that cost the most. The marker must stand down.
+    """
+    from openexecutive.orchestrator.session import MAX_HISTORY_TURNS
+
+    session = Session(session_id="long")
+    for i in range(MAX_HISTORY_TURNS + 3):
+        session.add_user_message(f"u{i}")
+        session.add_assistant_message(f"a{i}")
+
+    assert not session.history_window_is_stable()
+    assert _count_markers(_drive(session).get("messages")) == 0
+
+
+def test_marker_present_while_the_window_is_still_stable() -> None:
+    """The flip side: a short session must still get the rolling cache."""
+    session = Session(session_id="short")
+    session.add_user_message("u0")
+    session.add_assistant_message("a0")
+
+    assert session.history_window_is_stable()
+    assert _count_markers(_drive(session).get("messages")) == 1
+
+
+def test_marker_walks_back_past_structured_assistant_content() -> None:
+    """Session.add_assistant_message accepts list content. Pinning the marker
+    to the last assistant turn would then mark nothing at all; walking back to
+    the newest string turn degrades to partial caching instead of none."""
+    session = Session(session_id="structured")
+    session.add_user_message("u0")
+    session.add_assistant_message("a0-plain")
+    session.add_user_message("u1")
+    session.add_assistant_message([{"type": "text", "text": "a1-structured"}])
+
+    messages = _drive(session).get("messages") or []
+    marked = [m for m in messages if _count_markers(m)]
+    assert len(marked) == 1
+    assert marked[0]["content"][0]["text"] == "a0-plain"

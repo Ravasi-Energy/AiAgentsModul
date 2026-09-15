@@ -366,31 +366,40 @@ class Executive:
         messages: list[dict[str, Any]] = []
         history = session.get_recent_history()
 
-        # Rolling conversation cache: mark the LAST assistant turn, which is
-        # the boundary of the stable prefix. _build_messages runs before the
-        # current user message is appended to the session, so history always
-        # ends on an assistant turn and everything up to and including it is
-        # byte-identical to the previous request — exactly what a cache read
-        # needs. (This previously targeted len(history) - 2 while also
-        # requiring an assistant role; with even-length history that index is
-        # always a USER turn, so the marker never fired and the conversation
+        # Rolling conversation cache: mark the last assistant turn that can
+        # carry a marker. That turn is the boundary of the stable prefix —
+        # _build_messages runs before the current user message is appended to
+        # the session, so history ends on an assistant turn and everything up
+        # to and including it is byte-identical to the previous request.
+        #
+        # (This previously targeted len(history) - 2 while ALSO requiring an
+        # assistant role; with even-length history that index is always a USER
+        # turn, so the marker never fired at any depth and the conversation
         # prefix was re-sent uncached on every turn.)
-        last_assistant = next(
-            (
-                i
-                for i in range(len(history) - 1, -1, -1)
-                if history[i]["role"] == "assistant"
-            ),
-            None,
-        )
+        #
+        # Two conditions have to hold or the marker costs more than it saves:
+        #   - the history window must not be sliding yet. Past MAX_HISTORY_TURNS
+        #     the oldest exchange is dropped each turn, so messages[0] changes
+        #     and the prefix can never match; marking it would buy a guaranteed
+        #     cache WRITE (pricier than plain input) with no possible read.
+        #   - the turn's content must be a plain string. Structured content is
+        #     wrapped per block, so we walk back to the newest assistant turn
+        #     that is a string rather than silently marking nothing.
+        cache_index: int | None = None
+        if self._settings.enable_caching and session.history_window_is_stable():
+            cache_index = next(
+                (
+                    i
+                    for i in range(len(history) - 1, -1, -1)
+                    if history[i]["role"] == "assistant"
+                    and isinstance(history[i]["content"], str)
+                ),
+                None,
+            )
 
         for i, turn in enumerate(history):
             msg: dict[str, Any] = {"role": turn["role"], "content": turn["content"]}
-            if (
-                i == last_assistant
-                and self._settings.enable_caching
-                and isinstance(turn["content"], str)
-            ):
+            if i == cache_index:
                 msg["content"] = [
                     {
                         "type": "text",
@@ -1254,6 +1263,18 @@ class Executive:
             # Cap fan-out width per turn (inert by default — cap == roster
             # size). Dispatch the first `cap`; the rest get a skip tool_result
             # the model can react to. See router.partition_specialist_fanout.
+            # Charge run_executive_research BEFORE partitioning specialists.
+            # It runs a whole council synchronously inside this tool loop, and
+            # both blocks live in the same iteration body — charging it after
+            # the partition would let the FIRST iteration run the council and
+            # still fan out to the per-iteration cap, which is exactly what the
+            # budget exists to prevent.
+            research_uses = sum(
+                1 for tu in skill_tool_uses if tu["name"] == "run_executive_research"
+            )
+            if research_uses:
+                specialist_calls_used += research_uses * research_turn_budget_weight()
+
             remaining_budget = (
                 turn_budget - specialist_calls_used if turn_budget > 0 else None
             )
@@ -1370,15 +1391,8 @@ class Executive:
                     )
 
             if skill_tool_uses:
-                # run_executive_research runs a whole 7-specialist council
-                # synchronously inside this tool loop, so it is charged against
-                # the turn budget at its real weight — otherwise a turn could
-                # run the council AND still fan out to the per-iteration cap.
-                research_uses = sum(
-                    1 for tu in skill_tool_uses if tu["name"] == "run_executive_research"
-                )
-                if research_uses:
-                    specialist_calls_used += research_uses * research_turn_budget_weight()
+                # (run_executive_research was already charged against the turn
+                # budget above, before the specialist partition.)
                 for tu in skill_tool_uses:
                     logger.info("→ skill:%s  input=%s", tu["name"], _trunc(tu["input"]))
                 skill_results = await asyncio.gather(

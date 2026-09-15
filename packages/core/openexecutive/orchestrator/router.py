@@ -118,10 +118,20 @@ FANOUT_SKIP_MESSAGE = (
 )
 
 TURN_BUDGET_SKIP_MESSAGE = (
-    "Skipped: this turn has used its whole specialist budget "
-    "({budget} consultations). Answer with what the specialists already "
-    "returned; do not wait for this one."
+    "Skipped: this turn has used its whole specialist budget{budget_clause}. "
+    "Answer with what the specialists already returned; do not wait for this "
+    "one."
 )
+
+
+def _turn_budget_clause(turn_budget: int | None) -> str:
+    """Render the budget size only when the caller supplied it.
+
+    ``turn_budget`` is presentational, so an omitted value must degrade to a
+    message that still reads correctly rather than interpolating ``None`` into
+    a tool_result the model will read.
+    """
+    return f" ({turn_budget} consultations)" if turn_budget else ""
 
 
 def resolve_fanout_cap(max_parallel: int) -> int:
@@ -166,7 +176,9 @@ def partition_specialist_fanout(
     if budget_bound:
         cap = max(remaining_budget or 0, 0)
     message = (
-        TURN_BUDGET_SKIP_MESSAGE.format(budget=turn_budget)
+        TURN_BUDGET_SKIP_MESSAGE.format(
+            budget_clause=_turn_budget_clause(turn_budget)
+        )
         if budget_bound
         else FANOUT_SKIP_MESSAGE.format(cap=cap)
     )

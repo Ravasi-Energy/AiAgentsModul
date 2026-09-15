@@ -6,6 +6,10 @@ from typing import Any
 
 from openexecutive.audit.usage import log_model_usage
 from openexecutive.config import get_settings
+from openexecutive.prompts.cache_manager import (
+    build_cacheable_system,
+    estimate_tools_tokens,
+)
 from openexecutive.providers import get_provider, model_supports_deep_reasoning
 
 _SPECIALIST_TIMEOUT = 180.0
@@ -124,12 +128,13 @@ class BaseAgent(ABC):
             # the previous per-client timeout, but the provider singleton no
             # longer needs to recreate the SDK client to set it.
             "timeout": _SPECIALIST_TIMEOUT,
-            # No cache_control: a domain prompt is ~600-1100 tokens, under
-            # MIN_CACHEABLE_TOKENS_SONNET_OPUS, and the system block is the
-            # whole prefix here (no tools ahead of it on the prose path). A
-            # marker would be silently ignored, so carrying one would only
-            # suggest caching that is not happening.
-            "system": system_prompt,
+            # Cached only when the prefix actually clears the model's
+            # minimum. Most domain prompts (~600-700 tokens) do not, so they
+            # send bare and a marker would be silently ignored — but TALENT's
+            # is ~1087, and an operator override can be any length, so the
+            # decision is measured rather than assumed. No tools precede the
+            # system block on the prose path.
+            "system": build_cacheable_system(system_prompt, model),
             "messages": [{"role": "user", "content": user_content}],
         }
 
@@ -226,12 +231,14 @@ class BaseAgent(ABC):
             "model": model,
             "max_tokens": max_tokens,
             "timeout": timeout_seconds,
-            # No cache_control: a domain prompt is ~600-1100 tokens, under
-            # MIN_CACHEABLE_TOKENS_SONNET_OPUS, and the system block is the
-            # whole prefix here (no tools ahead of it on the prose path). A
-            # marker would be silently ignored, so carrying one would only
-            # suggest caching that is not happening.
-            "system": system_prompt,
+            # Tool definitions sit AHEAD of the system block in the cached
+            # prefix, so they count toward the minimum — this path can clear
+            # the threshold where the prose path does not. Callers here are
+            # high-frequency background loops (signal enrichment runs per new
+            # signal on a 5-minute scan), so it is worth caching when it works.
+            "system": build_cacheable_system(
+                system_prompt, model, prefix_tokens=estimate_tools_tokens(tools)
+            ),
             "tools": tools,
             "messages": [{"role": "user", "content": user_content}],
         }
