@@ -3,8 +3,10 @@
 import { useParams, useRouter } from "next/navigation";
 import { type ReactNode, useEffect, useState } from "react";
 
+import TelegramLinkPanel from "@/components/TelegramLinkPanel";
 import {
   archivePerson,
+  createTelegramLinkFor,
   getPerson,
   updatePerson,
   type AvailabilityWindow,
@@ -485,6 +487,10 @@ export default function PersonDetailPage() {
                           className="px-2 py-1.5 rounded-lg bg-surface-input border border-line text-sm focus:outline-none focus:border-indigo-500"
                           placeholder="123456789"
                         />
+                        <span className="text-[10px] text-fg-muted">
+                          Numeric, not a username. Easier: save, then use &quot;Generate Telegram link&quot; below — tapping it
+                          links the chat automatically.
+                        </span>
                       </label>
                     </DisclosureSection>
 
@@ -521,6 +527,35 @@ export default function PersonDetailPage() {
                         <div className="text-sm text-fg">{value}</div>
                       </div>
                     ))}
+                    {/* Self-serve Telegram pairing: the person taps the link, the bot binds their chat. */}
+                    <div className="py-3">
+                      <p className="text-xs text-fg-muted mb-2">
+                        {person.telegram_chat_id ? "Relink Telegram" : "Link Telegram"}: send {person.full_name} this link privately —
+                        whoever taps it within 10 minutes is linked to this profile, no chat ID needed.
+                      </p>
+                      <div className="flex flex-wrap items-start gap-2">
+                        <TelegramLinkPanel
+                          mint={() => createTelegramLinkFor(person.id)}
+                          buttonLabel="Generate Telegram link"
+                          compact
+                        />
+                        <button
+                          type="button"
+                          onClick={() => {
+                            getPerson(personId)
+                              .then((p) => {
+                                setPerson(p);
+                                resetForm(p);
+                              })
+                              .catch((e) => setError(e instanceof Error ? e.message : "Failed to reload"));
+                          }}
+                          className="rounded-lg border border-line px-3 py-1.5 text-sm text-fg-muted hover:bg-surface-input"
+                          title="Reload to see the linked chat ID"
+                        >
+                          Refresh
+                        </button>
+                      </div>
+                    </div>
                   </div>
                 )}
               </section>

@@ -515,7 +515,11 @@ Webhook-based bot registered via FastAPI (`POST /webhook/telegram`). Validates i
 
 Required env vars: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`
 
-**Access control**: roster-driven. A sender's chat_id must match the `telegram_chat_id` field of a non-archived Person row to receive a response.
+**Access control**: roster-driven. A sender's chat_id must match the `telegram_chat_id` field of a non-archived Person row to receive a response. Manage via the /people UI.
+
+**Linking a chat without hunting for the chat id**: `POST /people/me/telegram-link` (the caller's own Person, resolved like chat ownership) or `POST /people/{id}/telegram-link` mints a one-shot pairing code — 32 url-safe chars, sha256-hashed at rest, 10-minute TTL, a new code voids the person's earlier unused one — and returns `{code, deep_link, bot_username, expires_at}` (`deep_link` is `https://t.me/<bot>?start=<code>`, `null` when the instance has no token yet or Telegram can't be reached). The link is a bearer token: deliver it privately, since whoever taps it within the window is linked. Tapping it makes Telegram send `/start <code>` from the person's private chat (`chat.type == "private"` and a positive id — a group can never be bound to a Person); the webhook consumes the code *before* the roster gate (only an exact 32-char payload counts, so a rostered person's `/start <words>` still reaches the Executive), clears that chat id from any other row, writes it on the Person, invalidates the registry, audits `outcome="telegram_linked"` with any `displaced_person_ids`, and replies "Linked". A dead code audits `telegram_link_rejected`; if the chat is already linked (Telegram re-delivering the update that linked it) nothing is sent. The UI exposes this as "Link my Telegram" on the Telegram integration card and "Generate Telegram link" on the person page.
+
+**Unknown senders**: a private chat not on the roster gets one short, generic pointer per 10-minute cooldown (its own chat id, "ask whoever runs the bot"); the same cooldown covers the expired-link reply, tracked separately so one doesn't silence the other. Both are sent only when `TELEGRAM_WEBHOOK_SECRET` is set — an unverified update could be forged, and must not be able to make the bot message arbitrary chats — so unverified deployments keep the silent drop. Groups stay silent. The audit row records `replied`. Nothing here reaches the Executive.
 
 Setup: register the webhook once with Telegram after the API is deployed:
 ```bash

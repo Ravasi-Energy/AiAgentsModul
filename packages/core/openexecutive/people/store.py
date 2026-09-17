@@ -10,14 +10,17 @@ it take effect at call time, mirroring `departments.store`.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import logging
 import os
+import secrets
 import sqlite3
 from collections.abc import Generator
 from contextlib import contextmanager
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from typing import NamedTuple
 
 from openexecutive.people.models import (
     AuthorityScope,
@@ -117,6 +120,20 @@ def initialize_db(db_path: Path | None = None) -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_pa_person
                 ON person_availability(person_id);
+
+            -- Short-lived Telegram pairing codes: a Person taps
+            -- https://t.me/<bot>?start=<code> and the webhook binds the
+            -- sender's chat id to that row. Only the hash is stored.
+            CREATE TABLE IF NOT EXISTS person_telegram_link_codes (
+                code_hash TEXT PRIMARY KEY,
+                person_id INTEGER NOT NULL,
+                expires_at TEXT NOT NULL,
+                used_at TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (person_id) REFERENCES people(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_ptlc_person
+                ON person_telegram_link_codes(person_id);
         """)
         # Additive migration: discord_user_id added after initial schema.
         cols = {row["name"] for row in conn.execute("PRAGMA table_info(people)")}
@@ -352,6 +369,115 @@ def find_person_by_telegram_chat_id(telegram_chat_id: str, db_path: Path | None 
         if row is None:
             return None
         return _row_to_person(row, conn)
+
+
+# --------------------------------------------------------------------------- #
+# Telegram link codes
+# --------------------------------------------------------------------------- #
+
+TELEGRAM_LINK_TTL = timedelta(minutes=10)
+
+
+def _hash_link_code(code: str) -> str:
+    return hashlib.sha256(code.encode()).hexdigest()
+
+
+def create_telegram_link_code(
+    person_id: int,
+    ttl: timedelta = TELEGRAM_LINK_TTL,
+    db_path: Path | None = None,
+) -> tuple[str, str]:
+    """Mint a fresh pairing code for ``person_id``; returns ``(code, expires_at)``.
+
+    The code is 32 url-safe chars — exactly the charset Telegram allows in a
+    ``?start=`` deep-link payload (``[A-Za-z0-9_-]``, at most 64). Only its
+    hash is stored. Earlier unused codes for the person stop working, and
+    expired rows are pruned on the way. Raises ``ValueError`` when the person
+    is missing or archived so an archived row can never be relinked.
+    """
+    code = secrets.token_urlsafe(24)
+    now = datetime.now(UTC)
+    expires_at = (now + ttl).isoformat()
+    with _get_conn(db_path) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM people WHERE id = ? AND archived = 0", (person_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"Person {person_id} not found or archived")
+        conn.execute(
+            "DELETE FROM person_telegram_link_codes WHERE expires_at <= ? "
+            "OR (person_id = ? AND used_at IS NULL)",
+            (now.isoformat(), person_id),
+        )
+        conn.execute(
+            "INSERT INTO person_telegram_link_codes "
+            "(code_hash, person_id, expires_at, created_at) VALUES (?, ?, ?, ?)",
+            (_hash_link_code(code), person_id, expires_at, now.isoformat()),
+        )
+    return code, expires_at
+
+
+class TelegramLinkResult(NamedTuple):
+    person: Person
+    # People who held this chat id until now and lost it: an access removal
+    # the caller must audit.
+    displaced_person_ids: list[int]
+
+
+def consume_telegram_link_code(
+    code: str, chat_id: str, db_path: Path | None = None
+) -> TelegramLinkResult | None:
+    """Bind ``chat_id`` to the Person behind a live code, in one transaction.
+
+    ``None`` when the code is unknown, used, expired, or its Person is
+    archived — nothing is written in that case. On success the code is
+    marked used, any *other* row holding this chat id is cleared (the
+    inbound lookup is ``LIMIT 1``, so a duplicate would make the relink
+    silently ineffective) and reported in ``displaced_person_ids``, and the
+    linked Person is returned. Callers own the registry invalidation.
+    """
+    if not code or not chat_id or not _resolve_db_path(db_path).exists():
+        return None
+    now = _now()
+    code_hash = _hash_link_code(code)
+    with _get_conn(db_path) as conn:
+        # A DB from before this table existed (restored volume, entry point
+        # that skipped initialize_db) must read as "no live code", not 500.
+        if not _table_exists(conn, "person_telegram_link_codes"):
+            return None
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT c.person_id FROM person_telegram_link_codes c "
+            "JOIN people p ON p.id = c.person_id "
+            "WHERE c.code_hash = ? AND c.used_at IS NULL AND c.expires_at > ? "
+            "AND p.archived = 0",
+            (code_hash, now),
+        ).fetchone()
+        if row is None:
+            return None
+        person_id = int(row["person_id"])
+        conn.execute(
+            "UPDATE person_telegram_link_codes SET used_at = ? WHERE code_hash = ?",
+            (now, code_hash),
+        )
+        displaced = [
+            int(r["id"])
+            for r in conn.execute(
+                "SELECT id FROM people WHERE telegram_chat_id = ? AND id != ?", (chat_id, person_id)
+            ).fetchall()
+        ]
+        if displaced:
+            conn.execute(
+                "UPDATE people SET telegram_chat_id = NULL, updated_at = ? "
+                "WHERE telegram_chat_id = ? AND id != ?",
+                (now, chat_id, person_id),
+            )
+        conn.execute(
+            "UPDATE people SET telegram_chat_id = ?, updated_at = ? WHERE id = ?",
+            (chat_id, now, person_id),
+        )
+        person_row = conn.execute("SELECT * FROM people WHERE id = ?", (person_id,)).fetchone()
+        return TelegramLinkResult(person=_row_to_person(person_row, conn), displaced_person_ids=displaced)
 
 
 def find_person_by_email(email: str, db_path: Path | None = None) -> Person | None:

@@ -9,9 +9,12 @@ from __future__ import annotations
 import logging
 from datetime import date
 
-from fastapi import APIRouter, HTTPException, Response, status
+from fastapi import APIRouter, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 
+from openexecutive.config import get_settings
+from openexecutive.integrations import telegram_bot
 from openexecutive.people import registry as people_registry
 from openexecutive.people import store as people_store
 from openexecutive.people.models import (
@@ -44,6 +47,21 @@ class PersonCreate(BaseModel):
     reports_to_person_id: int | None = None
     authority_scope: list[AuthorityScope] = Field(default_factory=list)
     availability: list[AvailabilityWindow] = Field(default_factory=list)
+
+
+class TelegramLinkCode(BaseModel):
+    """A one-shot pairing code for a Person's Telegram chat.
+
+    ``deep_link`` is ``https://t.me/<bot>?start=<code>`` when the bot's
+    username is known; ``None`` when the instance has no Telegram token yet
+    or Telegram couldn't be reached. The UI then falls back to a known bot
+    username or shows the raw ``/start <code>`` instruction.
+    """
+
+    code: str
+    deep_link: str | None
+    bot_username: str | None
+    expires_at: str
 
 
 class PersonPatch(BaseModel):
@@ -159,6 +177,50 @@ def patch_person(person_id: int, body: PersonPatch) -> Person:
     if person is None:
         raise HTTPException(status_code=500, detail="Person vanished")
     return person
+
+
+async def _mint_telegram_link(person_id: int) -> TelegramLinkCode:
+    try:
+        # sqlite write off the event loop (the route is async for getMe).
+        code, expires_at = await run_in_threadpool(people_store.create_telegram_link_code, person_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Person not found") from exc
+    token = get_settings().telegram_bot_token
+    bot_username = await telegram_bot.get_bot_username(token) if token else None
+    return TelegramLinkCode(
+        code=code,
+        deep_link=telegram_bot.telegram_deep_link(bot_username, code) if bot_username else None,
+        bot_username=bot_username,
+        expires_at=expires_at,
+    )
+
+
+# Declared before the ``{person_id}`` variant so "me" never reaches the int
+# path parameter (422).
+@router.post("/people/me/telegram-link", response_model=TelegramLinkCode)
+async def create_my_telegram_link(request: Request) -> TelegramLinkCode:
+    """A pairing code for the caller's own Person (their web identity).
+
+    The caller is resolved the same way chat sessions are owned: the SaaS
+    account's Person, else the ``x-caller-email`` header, else the principal.
+    A signed-in caller with no Person row is refused rather than fused with
+    the principal.
+    """
+    from openexecutive.api.routes.chat import _resolve_caller_person_id
+
+    person_id = _resolve_caller_person_id(request)
+    if person_id is None:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "not_rostered", "message": "Your account isn't on the People roster yet"},
+        )
+    return await _mint_telegram_link(person_id)
+
+
+@router.post("/people/{person_id}/telegram-link", response_model=TelegramLinkCode)
+async def create_person_telegram_link(person_id: int) -> TelegramLinkCode:
+    """A pairing code to hand to ``person_id``."""
+    return await _mint_telegram_link(person_id)
 
 
 @router.post("/people/{person_id}/archive", status_code=status.HTTP_204_NO_CONTENT)

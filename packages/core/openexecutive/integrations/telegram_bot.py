@@ -4,12 +4,15 @@ import asyncio
 import hmac
 import logging
 import re
+import time
 from typing import Any
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
+from starlette.concurrency import run_in_threadpool
 
 from openexecutive.config import get_settings
+from openexecutive.people.store import TELEGRAM_LINK_TTL
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -44,6 +47,192 @@ def _get_http_client() -> httpx.AsyncClient:
 
 def _tg_url(token: str, method: str) -> str:
     return _TELEGRAM_API.format(token=token, method=method)
+
+
+# --------------------------------------------------------------------------- #
+# Self-serve chat linking
+#
+# A Person taps https://t.me/<bot>?start=<code>; Telegram delivers
+# "/start <code>" from their private chat and the webhook binds that chat id
+# to the Person (people.store.consume_telegram_link_code) before the roster
+# gate. Unrecognised private senders get a short pointer instead of silence —
+# but only on updates the webhook secret has verified (see telegram_webhook).
+# --------------------------------------------------------------------------- #
+
+# Telegram's deep-link payload charset is [A-Za-z0-9_-], 1..64 chars; our codes
+# are always exactly 32 (secrets.token_urlsafe(24)). Matching the exact length
+# keeps a rostered person's "/start <some words>" from being mistaken for a
+# pairing attempt and swallowed.
+_START_CODE_RE = re.compile(r"^/start(?:@\w+)?\s+([A-Za-z0-9_\-]{32})$", re.IGNORECASE)
+_LINK_TTL_MINUTES = int(TELEGRAM_LINK_TTL.total_seconds() // 60)
+
+LINKED_REPLY = "Linked — you're now talking to the Executive as {name}. Send a message to start."
+# Deliberately generic: a stranger learns nothing about the product or how
+# access is granted beyond "ask the operator".
+LINK_EXPIRED_REPLY = (
+    f"That link has expired or was already used. Ask for a new one and tap it within {_LINK_TTL_MINUTES} minutes."
+)
+UNKNOWN_SENDER_REPLY = (
+    "This bot isn't available to your Telegram account yet. Your chat ID is {chat_id} — "
+    "give it to whoever runs the bot, or ask them for a link to tap."
+)
+
+# One unsolicited reply per (kind, chat) per cooldown, so a flood of strangers
+# or someone guessing codes costs at most one sendMessage per chat per window
+# and gets no per-attempt feedback. Kinds are tracked separately so the
+# pointer a stranger got for saying "hi" doesn't swallow the "link expired"
+# reply they need a minute later. Bounded so fresh chat ids can't grow it.
+_REPLY_COOLDOWN_S = 600
+_REPLY_COOLDOWN_MAX_TRACKED = 10_000
+_unsolicited_reply_at: dict[tuple[str, int], float] = {}
+
+
+def _may_send_unsolicited(kind: str, chat_id: int, now: float | None = None) -> bool:
+    now = time.monotonic() if now is None else now
+    key = (kind, chat_id)
+    last = _unsolicited_reply_at.get(key)
+    if last is not None and now - last < _REPLY_COOLDOWN_S:
+        return False
+    if len(_unsolicited_reply_at) >= _REPLY_COOLDOWN_MAX_TRACKED:
+        stale = [k for k, ts in _unsolicited_reply_at.items() if now - ts >= _REPLY_COOLDOWN_S]
+        for k in stale:
+            _unsolicited_reply_at.pop(k, None)
+        if len(_unsolicited_reply_at) >= _REPLY_COOLDOWN_MAX_TRACKED:
+            # Still full of live entries: stay quiet rather than grow.
+            return False
+    _unsolicited_reply_at[key] = now
+    return True
+
+
+# getMe answers are stable; cache per token so minting a link doesn't hit
+# Telegram every time. Single-flight behind a lock, a short timeout, and a
+# brief negative cache keep a Telegram outage from stacking up slow mints.
+_BOT_USERNAME_TTL_S = 3600
+_BOT_USERNAME_NEGATIVE_TTL_S = 60
+_BOT_USERNAME_TIMEOUT_S = 10
+_BOT_USERNAME_MAX_CACHED = 8  # one token per instance in practice
+_bot_username_cache: dict[str, tuple[str | None, float]] = {}
+_bot_username_lock: tuple[asyncio.AbstractEventLoop, asyncio.Lock] | None = None
+
+
+def _username_lock() -> asyncio.Lock:
+    """A lock bound to the running loop (tests spin up a loop per test)."""
+    global _bot_username_lock
+    loop = asyncio.get_running_loop()
+    if _bot_username_lock is None or _bot_username_lock[0] is not loop:
+        _bot_username_lock = (loop, asyncio.Lock())
+    return _bot_username_lock[1]
+
+
+async def get_bot_username(token: str) -> str | None:
+    """The bot's @username (without the @), or None if Telegram can't tell us."""
+    async with _username_lock():
+        now = time.monotonic()
+        cached = _bot_username_cache.get(token)
+        if cached is not None and cached[1] > now:
+            return cached[0]
+        username: str | None = None
+        try:
+            resp = await _get_http_client().get(_tg_url(token, "getMe"), timeout=_BOT_USERNAME_TIMEOUT_S)
+            if resp.is_success:
+                value = resp.json().get("result", {}).get("username")
+                username = str(value) if value else None
+            else:
+                logger.warning("Telegram getMe failed: %s", resp.status_code)
+        except Exception as exc:
+            # Only the type: httpx's repr carries the URL, which embeds the token.
+            logger.warning("Telegram getMe error: %s", type(exc).__name__)
+        if len(_bot_username_cache) >= _BOT_USERNAME_MAX_CACHED:
+            _bot_username_cache.clear()
+        ttl = _BOT_USERNAME_TTL_S if username else _BOT_USERNAME_NEGATIVE_TTL_S
+        _bot_username_cache[token] = (username, now + ttl)
+        return username
+
+
+def telegram_deep_link(bot_username: str, code: str) -> str:
+    return f"https://t.me/{bot_username}?start={code}"
+
+
+async def _audit_inbound(summary: str, details: dict[str, Any]) -> None:
+    """Audit row, written off the event loop (sqlite)."""
+    from openexecutive.audit import log_event as audit_log
+
+    await run_in_threadpool(
+        audit_log, "integration_inbound", summary, actor="telegram", details={"channel": "telegram", **details}
+    )
+
+
+async def _reject_inbound(
+    background_tasks: BackgroundTasks,
+    *,
+    token: str,
+    chat_id: int,
+    outcome: str,
+    summary: str,
+    reply: str,
+    may_reply: bool,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    """Audit a dropped update and, when allowed, send one pointer per cooldown."""
+    replied = may_reply and _may_send_unsolicited(outcome, chat_id)
+    logger.warning("Telegram: rejected %s (replied=%s)", summary, replied)
+    await _audit_inbound(
+        f"Rejected: {summary}", {"chat_id": chat_id, "outcome": outcome, "replied": replied, **(extra or {})}
+    )
+    if replied:
+        background_tasks.add_task(send_message, token, chat_id, reply)
+
+
+async def _try_pairing(
+    background_tasks: BackgroundTasks, *, token: str, chat_id: int, text: str, may_reply: bool
+) -> bool:
+    """Consume a ``/start <code>`` pairing link. True when the update was handled
+    (linked or rejected) and must not reach the Executive."""
+    match = _START_CODE_RE.match(text)
+    if not match:
+        return False
+    from openexecutive.people.store import (
+        consume_telegram_link_code,
+        find_person_by_telegram_chat_id,
+    )
+
+    result = await run_in_threadpool(consume_telegram_link_code, match.group(1), str(chat_id))
+    if result is None:
+        # A chat that is already linked and presents a dead code is almost
+        # always Telegram re-delivering the update that linked it: stay quiet
+        # rather than tell a freshly linked person their link expired.
+        already = await run_in_threadpool(find_person_by_telegram_chat_id, str(chat_id))
+        await _reject_inbound(
+            background_tasks,
+            token=token,
+            chat_id=chat_id,
+            outcome="telegram_link_rejected",
+            summary=f"telegram link code from chat_id={chat_id} not live",
+            reply=LINK_EXPIRED_REPLY,
+            may_reply=may_reply and already is None,
+            extra={"already_linked": already is not None},
+        )
+        return True
+    from openexecutive.people import registry as people_registry
+
+    people_registry.invalidate()
+    person = result.person
+    logger.info(
+        "Telegram: linked chat_id=%s to person_id=%s (displaced=%s)", chat_id, person.id, result.displaced_person_ids
+    )
+    await _audit_inbound(
+        f"Linked telegram chat_id={chat_id} to {person.full_name}",
+        {
+            "chat_id": chat_id,
+            "person_id": person.id,
+            # Anyone who held this chat id before and lost it — an access
+            # removal, so it must be on the record.
+            "displaced_person_ids": result.displaced_person_ids,
+            "outcome": "telegram_linked",
+        },
+    )
+    background_tasks.add_task(send_message, token, chat_id, LINKED_REPLY.format(name=person.full_name))
+    return True
 
 
 def _split_message(text: str) -> list[str]:
@@ -363,8 +552,10 @@ async def telegram_webhook(request: Request, background_tasks: BackgroundTasks) 
 
     # Extract fields safely — malformed payloads return 200 to stop Telegram retries.
     try:
-        chat_id: int = message["chat"]["id"]
-        message_id: int = message["message_id"]
+        chat_id = message["chat"]["id"]
+        message_id = message["message_id"]
+        if not isinstance(chat_id, int) or isinstance(chat_id, bool) or not isinstance(message_id, int):
+            raise TypeError("chat.id / message_id must be integers")
     except (KeyError, TypeError):
         logger.warning("Telegram: malformed message payload, missing chat.id or message_id")
         return {}
@@ -374,31 +565,43 @@ async def telegram_webhook(request: Request, background_tasks: BackgroundTasks) 
         filter(None, [from_user.get("first_name"), from_user.get("last_name")])
     ) or from_user.get("username") or f"chat:{chat_id}"
 
-    # Roster gate. The Telegram chat must match a non-archived Person
-    # with telegram_chat_id set. Manage access via the /people UI; the
-    # old TELEGRAM_ALLOWED_CHAT_IDS env var has been removed.
-    from openexecutive.audit import log_event as audit_log
     from openexecutive.people.store import find_person_by_telegram_chat_id
 
-    if find_person_by_telegram_chat_id(str(chat_id)) is None:
-        logger.warning(
-            "Telegram: rejected message from chat_id=%s (not in People roster)",
-            chat_id,
-        )
-        audit_log(
-            "integration_inbound",
-            f"Rejected: telegram chat_id={chat_id} not in People roster",
-            actor="telegram",
-            details={
-                "channel": "telegram",
-                "chat_id": chat_id,
-                "outcome": "rejected_unknown_sender",
-            },
+    # Telegram may send either key with a null value.
+    text = (message.get("text") or message.get("caption") or "").strip()
+    # A 1:1 chat: positive id by convention AND Telegram's own chat.type, so
+    # pairing (and pointers) can never target a group, where any member
+    # could otherwise speak as the linked Person.
+    chat_obj: dict[str, Any] = message.get("chat") or {}
+    is_private = chat_id > 0 and chat_obj.get("type") == "private"
+    # Unsolicited replies go only to updates the webhook secret has verified:
+    # without one, anyone who knows the URL could make the bot message
+    # arbitrary chats. Unverified deployments keep the legacy silent drop.
+    may_reply = is_private and bool(settings.telegram_webhook_secret)
+    token = settings.telegram_bot_token
+
+    # Pairing runs BEFORE the roster gate — the whole point is that this chat
+    # isn't on the roster yet. Never falls through to the Executive.
+    if is_private and await _try_pairing(
+        background_tasks, token=token, chat_id=chat_id, text=text, may_reply=may_reply
+    ):
+        return {}
+
+    # Roster gate. The Telegram chat must match a non-archived Person with
+    # telegram_chat_id set — via the /people UI or the pairing link above; the
+    # old TELEGRAM_ALLOWED_CHAT_IDS env var has been removed.
+    if await run_in_threadpool(find_person_by_telegram_chat_id, str(chat_id)) is None:
+        await _reject_inbound(
+            background_tasks,
+            token=token,
+            chat_id=chat_id,
+            outcome="rejected_unknown_sender",
+            summary=f"telegram chat_id={chat_id} not in People roster",
+            reply=UNKNOWN_SENDER_REPLY.format(chat_id=chat_id),
+            may_reply=may_reply,
         )
         return {}
 
-    text: str = message.get("text", "") or message.get("caption", "")
-    text = text.strip()
     # Only strip known bot commands (/start, /help, /ask), not arbitrary slash-prefixed content.
     text = _COMMAND_RE.sub("", text).strip()
 

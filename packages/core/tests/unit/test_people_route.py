@@ -193,3 +193,56 @@ def test_create_invalidates_registry(client: TestClient) -> None:
 
     after = people_registry.list_people()
     assert len(after) == 1
+
+
+# --------------------------------------------------------------------------- #
+# Telegram link codes
+# --------------------------------------------------------------------------- #
+
+def _mock_bot_username(monkeypatch: pytest.MonkeyPatch, value: str | None) -> None:
+    from unittest.mock import AsyncMock
+
+    from openexecutive.integrations import telegram_bot
+
+    monkeypatch.setattr(telegram_bot, "get_bot_username", AsyncMock(return_value=value))
+
+
+def test_my_telegram_link_resolves_caller_by_email(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456:abcdefghijklmnopqrstuvwxyzABCDEFGH")
+    _mock_bot_username(monkeypatch, "exec_bot")
+    pid = client.post("/people", json={"full_name": "Ann", "email": "ann@example.com"}).json()["id"]
+    resp = client.post("/people/me/telegram-link", headers={"x-caller-email": "Ann@Example.com"})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["bot_username"] == "exec_bot"
+    assert body["deep_link"] == f"https://t.me/exec_bot?start={body['code']}"
+    assert len(body["code"]) == 32 and body["expires_at"]
+    # The code really belongs to Ann.
+    linked = people_store.consume_telegram_link_code(body["code"], "777")
+    assert linked is not None and linked.person.id == pid
+
+
+def test_my_telegram_link_without_bot_token_still_mints(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    client.post("/people", json={"full_name": "Ann", "email": "ann@example.com"})
+    resp = client.post("/people/me/telegram-link", headers={"x-caller-email": "ann@example.com"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["deep_link"] is None and body["bot_username"] is None and body["code"]
+
+
+def test_my_telegram_link_unrostered_caller_is_refused(client: TestClient) -> None:
+    client.post("/people", json={"full_name": "Boss", "is_principal": True, "email": "boss@example.com"})
+    resp = client.post("/people/me/telegram-link", headers={"x-caller-email": "stranger@example.com"})
+    assert resp.status_code == 403
+    assert resp.json()["detail"]["code"] == "not_rostered"
+
+
+def test_person_telegram_link_for_someone_else(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456:abcdefghijklmnopqrstuvwxyzABCDEFGH")
+    _mock_bot_username(monkeypatch, None)  # Telegram unreachable: code still minted
+    pid = client.post("/people", json={"full_name": "Bo"}).json()["id"]
+    resp = client.post(f"/people/{pid}/telegram-link")
+    assert resp.status_code == 200
+    assert resp.json()["deep_link"] is None and resp.json()["code"]
+    assert client.post("/people/9999/telegram-link").status_code == 404

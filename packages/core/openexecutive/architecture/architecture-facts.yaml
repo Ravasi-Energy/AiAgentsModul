@@ -2657,8 +2657,61 @@ integrations:
       • Discord, Slack, Telegram: still roster-gated on inbound. A
         sender's channel ID must match a non-archived Person row
         (discord_user_id / slack_user_id / telegram_chat_id).
-        Unknown senders are silently dropped with
-        ``details.outcome="rejected_unknown_sender"``.
+        Unknown senders never reach the Executive
+        (``details.outcome="rejected_unknown_sender"``). Slack and
+        Discord drop silently. Telegram answers an unknown PRIVATE chat
+        (chat_id > 0 AND chat.type == "private") with one generic
+        pointer per 10-minute cooldown — its own chat id plus "give it
+        to whoever runs the bot, or ask them for a link" (no product
+        name, no enrolment procedure: recon-light) — ONLY when
+        TELEGRAM_WEBHOOK_SECRET is set, i.e. the update is verified; an
+        unverified deployment keeps the legacy silent drop so a forged
+        POST can't make the bot message arbitrary chats.
+        ``details.replied`` says whether it did; groups stay silent.
+        Cooldowns are keyed (kind, chat_id) so the pointer a stranger
+        got for "hi" doesn't swallow the expired-link reply; the map is
+        bounded (10k) so a flood of fresh chat ids can't grow memory.
+      • Telegram pairing (``integrations.telegram_bot._try_pairing``,
+        before the gate, private chats only): ``/start <code>`` — an
+        EXACT 32-char payload, so a rostered person's "/start <words>"
+        is never mistaken for a code — is matched against
+        ``people.store.consume_telegram_link_code`` (returns a
+        TelegramLinkResult: person + displaced_person_ids) —
+        one transaction (off the event loop) that checks the code is
+        unused/unexpired and the Person not archived, marks it used,
+        clears that chat id from any other row (the inbound lookup is
+        LIMIT 1, so a duplicate would make the relink silently
+        ineffective), writes it on the Person, and returns it; a DB
+        without the table reads as "no live code". The webhook
+        invalidates the people registry, audits
+        ``outcome="telegram_linked"`` (person_id, displaced_person_ids —
+        a relink is an access removal for the previous holder, so it is
+        on the record) and replies "Linked" (this reply needs no secret:
+        a valid code is its own proof). A dead code audits
+        ``telegram_link_rejected`` (+ ``already_linked``) and gets the
+        expired-link reply under the cooldown/secret rules above — except
+        from a chat that is already linked (Telegram re-delivering the
+        update that linked it), which stays quiet. Audit writes run off
+        the loop. A non-integer chat.id / message_id is a malformed
+        payload (200, dropped), never a 500.
+        Codes come from ``POST /people/me/telegram-link`` (caller's own
+        Person via ``_resolve_caller_person_id``; 403 ``not_rostered``)
+        and ``POST /people/{id}/telegram-link``. Note a channel turn never
+        enters ``bind_caller_role``: whoever is linked runs the Executive
+        with the operator's tool belt, so pairing is an operator grant.
+        ``create_telegram_link_code`` mints 32 url-safe chars
+        (Telegram's ``?start=`` charset, ≤64), stores only the sha256,
+        10-minute TTL, voids the person's earlier unused code, prunes
+        expired rows, ValueError on missing / archived. The route adds
+        ``deep_link`` = ``https://t.me/<bot>?start=<code>`` from a cached
+        ``getMe`` (``get_bot_username``: single-flight lock, 10 s
+        timeout, 1 h positive / 60 s negative, bounded), null when
+        there's no token yet — the UI falls back to a known bot
+        username only if it is a real username. The link is a bearer token delivered
+        out of band: docs and UI say to send it privately. Table
+        ``person_telegram_link_codes(code_hash PK, person_id FK CASCADE,
+        expires_at, used_at, created_at)`` in the people DB. UI:
+        "Generate Telegram link" on /people/{id}.
 
     Outbound — roster-gated everywhere this matters:
       • Gmail send (``send_gmail_message`` — which also covers reply/forward

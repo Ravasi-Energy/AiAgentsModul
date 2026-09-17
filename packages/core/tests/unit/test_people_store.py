@@ -270,3 +270,78 @@ def test_find_person_by_email_returns_none_when_table_missing(tmp_path: Path) ->
     conn.commit()
     conn.close()
     assert people_store.find_person_by_email("a@b.com", db_path=shared) is None
+
+
+# --------------------------------------------------------------------------- #
+# Telegram link codes
+# --------------------------------------------------------------------------- #
+
+def test_telegram_link_code_format_and_expiry(db: Path) -> None:
+    pid = people_store.upsert_person(full_name="Alex")
+    code, expires_at = people_store.create_telegram_link_code(pid)
+    assert len(code) == 32
+    assert all(c.isalnum() or c in "_-" for c in code)  # Telegram ?start= charset
+    from datetime import UTC, datetime
+    delta = datetime.fromisoformat(expires_at) - datetime.now(UTC)
+    assert 9 * 60 < delta.total_seconds() <= 10 * 60
+
+
+def test_consume_telegram_link_code_binds_chat(db: Path) -> None:
+    pid = people_store.upsert_person(full_name="Alex")
+    code, _ = people_store.create_telegram_link_code(pid)
+    result = people_store.consume_telegram_link_code(code, "8519677317")
+    assert result is not None and result.person.id == pid
+    assert result.person.telegram_chat_id == "8519677317"
+    assert result.displaced_person_ids == []
+    found = people_store.find_person_by_telegram_chat_id("8519677317")
+    assert found is not None and found.id == pid
+    # Single use.
+    assert people_store.consume_telegram_link_code(code, "8519677317") is None
+
+
+def test_consume_unknown_or_expired_code(db: Path) -> None:
+    from datetime import timedelta
+    pid = people_store.upsert_person(full_name="Alex")
+    assert people_store.consume_telegram_link_code("not-a-real-code-at-all", "1") is None
+    code, _ = people_store.create_telegram_link_code(pid, ttl=timedelta(seconds=-1))
+    assert people_store.consume_telegram_link_code(code, "1") is None
+    assert people_store.get_person(pid).telegram_chat_id is None  # type: ignore[union-attr]
+
+
+def test_archived_person_cannot_be_linked(db: Path) -> None:
+    pid = people_store.upsert_person(full_name="Gone")
+    code, _ = people_store.create_telegram_link_code(pid)
+    people_store.archive_person(pid)
+    assert people_store.consume_telegram_link_code(code, "1") is None
+    with pytest.raises(ValueError):
+        people_store.create_telegram_link_code(pid)
+    with pytest.raises(ValueError):
+        people_store.create_telegram_link_code(9999)
+
+
+def test_relink_clears_chat_id_from_other_person(db: Path) -> None:
+    old = people_store.upsert_person(full_name="Old", telegram_chat_id="42")
+    new = people_store.upsert_person(full_name="New")
+    code, _ = people_store.create_telegram_link_code(new)
+    linked = people_store.consume_telegram_link_code(code, "42")
+    assert linked is not None and linked.person.id == new
+    assert linked.displaced_person_ids == [old]
+    assert people_store.get_person(old).telegram_chat_id is None  # type: ignore[union-attr]
+    assert people_store.find_person_by_telegram_chat_id("42").id == new  # type: ignore[union-attr]
+
+
+def test_new_code_invalidates_previous_unused_code(db: Path) -> None:
+    pid = people_store.upsert_person(full_name="Alex")
+    first, _ = people_store.create_telegram_link_code(pid)
+    second, _ = people_store.create_telegram_link_code(pid)
+    assert people_store.consume_telegram_link_code(first, "1") is None
+    assert people_store.consume_telegram_link_code(second, "1") is not None
+
+
+def test_consume_link_code_without_table_reads_as_no_code(db: Path) -> None:
+    import sqlite3
+    pid = people_store.upsert_person(full_name="Alex")
+    code, _ = people_store.create_telegram_link_code(pid)
+    with sqlite3.connect(str(db)) as conn:
+        conn.execute("DROP TABLE person_telegram_link_codes")
+    assert people_store.consume_telegram_link_code(code, "1") is None

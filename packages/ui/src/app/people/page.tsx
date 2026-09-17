@@ -401,6 +401,10 @@ function AddPersonModal({ onCreated, onClose }: AddPersonModalProps) {
                 className="px-3 py-2 rounded-lg bg-surface-input border border-line text-sm focus:outline-none focus:border-indigo-500"
                 placeholder="123456789"
               />
+              <span className="text-[10px] text-fg-muted">
+                Numeric, not a username. Easier: leave it blank, save, then use &quot;Generate Telegram link&quot; on their
+                profile — tapping it links their chat automatically.
+              </span>
             </label>
           </DisclosureSection>
 

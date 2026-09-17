@@ -2260,6 +2260,46 @@ export async function archivePerson(id: number): Promise<void> {
   if (!res.ok) throw new Error(`Failed to archive person: ${res.statusText}`);
 }
 
+// A one-shot Telegram pairing code. Tapping `deep_link` (or sending
+// `/start <code>` to the bot) binds the sender's chat to the Person; the
+// webhook does the rest. `deep_link` is null when the instance can't name the
+// bot yet (no token, or Telegram unreachable) — callers fall back to a known
+// bot username or show the raw command.
+export interface TelegramLinkCode {
+  code: string;
+  deep_link: string | null;
+  bot_username: string | null;
+  expires_at: string;
+}
+
+// The backend answers a refused mint with a readable `detail.message`
+// (e.g. "Your account isn't on the People roster yet"); surface that.
+async function _telegramLinkError(res: Response): Promise<never> {
+  const body = (await res.json().catch(() => ({}))) as { detail?: { message?: unknown } | string };
+  const detail = body.detail;
+  const message =
+    typeof detail === "string"
+      ? detail
+      : typeof detail?.message === "string"
+        ? detail.message
+        : `Couldn't create a Telegram link: ${res.statusText}`;
+  throw new Error(message);
+}
+
+/** A pairing code for the signed-in user's own Person. */
+export async function createMyTelegramLink(): Promise<TelegramLinkCode> {
+  const res = await fetch(`${API_BASE}/people/me/telegram-link`, { method: "POST" });
+  if (!res.ok) return _telegramLinkError(res);
+  return res.json();
+}
+
+/** A pairing code to hand to a specific Person. */
+export async function createTelegramLinkFor(personId: number): Promise<TelegramLinkCode> {
+  const res = await fetch(`${API_BASE}/people/${personId}/telegram-link`, { method: "POST" });
+  if (!res.ok) return _telegramLinkError(res);
+  return res.json();
+}
+
 // ---------------------------------------------------------------------------
 // Today (live dashboard) — was previously named "Morning Brief"
 // ---------------------------------------------------------------------------
