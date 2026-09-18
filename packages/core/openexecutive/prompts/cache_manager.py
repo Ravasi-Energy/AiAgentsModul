@@ -46,9 +46,10 @@ def build_system_blocks(
     tz = settings.user_timezone
     tz_addendum = f"\n\nThe user's local timezone is {tz} (IANA). When converting relative times to UTC for scheduling, use this zone."
 
-    # The Executive has its own Google Workspace account; without this it
-    # falls back to asking the user "what email should I use?" on every
-    # Gmail/Calendar/Drive tool call. Process-stable, so cache stays warm.
+    # The Executive has its own workspace account (Google Workspace or
+    # Microsoft 365); without this it falls back to asking the user "what email
+    # should I use?" on every mail/calendar/drive tool call. Process-stable, so
+    # cache stays warm.
     # Always appended (even when persona is user-overridden) so a custom
     # persona can never silently drop the bot's own identity.
     exec_email = settings.exec_email_address
@@ -62,8 +63,8 @@ def build_system_blocks(
         f"**Your email address is {exec_email}.** This mailbox belongs to you — "
         "not to the human you are chatting with. The human has a different email address. "
         f"Do not refer to {exec_email} as the user's email; it is yours.\n\n"
-        "When using Gmail, Calendar, Drive, or any Google Workspace tool, act from your own "
-        f"account ({exec_email}). Never ask the user which address to send from — always send, "
+        "When using mail, calendar, drive, or any Google Workspace / Microsoft 365 tool, act "
+        f"from your own account ({exec_email}). Never ask the user which address to send from — always send, "
         "create events, and own documents from your own account. If you need the user's email "
         "or a third party's email, ask for that specifically by name.\n\n"
         "**Never impersonate company personnel.** You are NOT any of the people listed in "

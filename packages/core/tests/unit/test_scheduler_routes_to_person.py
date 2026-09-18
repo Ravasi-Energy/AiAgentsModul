@@ -261,3 +261,62 @@ def test_no_department_bypasses_gate() -> None:
         asyncio.run(_execute_action(action, gateway=None))
 
     mock_chat.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# email channel → the synthetic trigger names the configured mail backend's
+# send tool (EMAIL_PROVIDER), not a hard-coded Gmail tool
+# ---------------------------------------------------------------------------
+
+def _run_email_action_and_capture_prompt(provider: object) -> str:
+    dept_store.seed_default_departments()
+    dept_store.update_department("operations", authority_level=AuthorityLevel.AUTO_EXECUTE)
+    dept_registry.invalidate()
+    action = _make_action(
+        department="operations", channel="email", channel_ref="alice@example.com|t1",
+    )
+    with patch(
+        "openexecutive.orchestrator.executive.Executive.chat",
+        new_callable=AsyncMock,
+    ) as mock_chat, patch(
+        "openexecutive.onboarding.profile_builder.load_or_create_profile",
+        return_value=MagicMock(is_empty=lambda: True),
+    ), patch(
+        "openexecutive.knowledge.retriever.retrieve",
+        return_value="",
+    ), patch(
+        "openexecutive.memory.episodic.format_for_prompt",
+        return_value="",
+    ), patch(
+        "openexecutive.integrations.workspace.registry.get_mail_provider",
+        return_value=provider,
+    ):
+        asyncio.run(_execute_action(action, gateway=MagicMock()))
+    mock_chat.assert_called_once()
+    return str(mock_chat.call_args.kwargs["user_message"])
+
+
+def test_email_action_hint_follows_the_mail_provider() -> None:
+    from openexecutive.integrations.workspace.google import GoogleMail
+    from openexecutive.integrations.workspace.microsoft import MicrosoftMail
+
+    prompt = _run_email_action_and_capture_prompt(GoogleMail())
+    assert "google_workspace__send_gmail_message (via MCP)" in prompt
+    assert "microsoft_365" not in prompt
+
+    prompt = _run_email_action_and_capture_prompt(MicrosoftMail())
+    assert "microsoft_365__send-mail" in prompt
+    assert "send_gmail_message" not in prompt
+
+
+def test_email_action_without_gateway_fails_fast() -> None:
+    action = _make_action(channel="email", channel_ref="alice@example.com")
+    with patch(
+        "openexecutive.orchestrator.executive.Executive.chat",
+        new_callable=AsyncMock,
+    ) as mock_chat:
+        asyncio.run(_execute_action(action, gateway=None))
+    mock_chat.assert_not_called()
+    updated = episodic.get_scheduled_action(action.id)
+    assert updated is not None
+    assert updated.status != "done"

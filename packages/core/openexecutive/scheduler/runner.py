@@ -731,9 +731,10 @@ async def _execute_action(
         logger.info("scheduler: action %d (__internal__) completed without dispatch", action.id)
         return
 
-    # Email channel requires MCP (Gmail send tool is an MCP tool). Without
-    # a gateway, the Executive cannot deliver — short-circuit with a clear
-    # error rather than burning attempts on silent failures.
+    # Email channel requires MCP (the mail send tool is an MCP tool, whichever
+    # backend EMAIL_PROVIDER names). Without a gateway, the Executive cannot
+    # deliver — short-circuit with a clear error rather than burning attempts
+    # on silent failures.
     if action.channel == "email" and gateway is None:
         mark_action_failed_or_retry(
             action.id,
@@ -764,12 +765,19 @@ async def _execute_action(
         retrieved_context = retrieve(query=action.intent_text)
         episodic_context = format_for_prompt()
 
-        send_tool_hint = {
-            "telegram": "send_telegram_message",
-            "slack_dm": "send_slack_dm",
-            "discord_dm": "send_discord_dm",
-            "email": "google_workspace__send_gmail_message (via MCP)",
-        }.get(action.channel, "the appropriate send tool")
+        if action.channel == "email":
+            # Names the configured mail backend's send tool (EMAIL_PROVIDER);
+            # resolved only here so a provider lookup can never affect the
+            # DM channels.
+            from openexecutive.integrations.workspace.registry import get_mail_provider
+
+            send_tool_hint = get_mail_provider().send_tool_hint()
+        else:
+            send_tool_hint = {
+                "telegram": "send_telegram_message",
+                "slack_dm": "send_slack_dm",
+                "discord_dm": "send_discord_dm",
+            }.get(action.channel, "the appropriate send tool")
 
         # Wrap stored intent in delimiters to make prompt-injection harder.
         # The framing tells the Executive that everything inside the tag is

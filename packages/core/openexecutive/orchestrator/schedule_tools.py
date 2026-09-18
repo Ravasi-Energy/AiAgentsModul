@@ -10,8 +10,10 @@ skill tools. They let the Executive:
 - send a Discord DM directly via `send_discord_dm`
 - look up a person by name via `lookup_person` (returns routing identifiers)
 
-Email sends already work via the MCP gateway tool `google_workspace__send_gmail_message`,
-so there is no `send_email` wrapper here.
+Email sends already work via the MCP gateway's mail send tool (Gmail's
+`google_workspace__send_gmail_message` or Outlook's `microsoft_365__send-mail`,
+per EMAIL_PROVIDER — see `integrations.workspace`), so there is no `send_email`
+wrapper here.
 """
 from __future__ import annotations
 

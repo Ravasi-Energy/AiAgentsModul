@@ -268,6 +268,11 @@ async def _start_mcp_gateway(
     app.state.mcp_gateway = gateway
     set_active_gateway(gateway)
 
+    # Say which mail/calendar backends the fixed code paths will use, and warn
+    # (never fail) when a chosen backend's server is not in the config.
+    from openexecutive.integrations.workspace.registry import log_provider_status
+    log_provider_status(settings, config_path)
+
     from openexecutive.integrations.email_poller import run_email_poller
     return asyncio.create_task(run_email_poller(gateway))
 
