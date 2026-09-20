@@ -1,0 +1,20 @@
+id: executive
+version: 0.1.0
+title: Executive
+voice: single
+description: Pack 0 — voce C-suite pe kernelul nostru
+entrypoint: chat
+models:
+  default: sonnet
+  judgment: opus
+  routing: haiku
+tools:
+  class_default: none
+  allow_servers: []
+memory:
+  namespace: pack.executive
+  ambient_writeback: false
+hitl:
+  writes: always
+budget:
+  daily_usd_cap: 25

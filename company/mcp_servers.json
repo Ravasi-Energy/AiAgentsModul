@@ -1,0 +1,23 @@
+{
+  "_comment": "F1: MCP_ENABLED=false în .env. Gateway-ul nu pornește. Secrete doar $VAR.",
+  "mcpServers": {
+    "fetch": {
+      "command": "uvx",
+      "args": ["mcp-server-fetch"],
+      "_class": "read"
+    }
+  },
+  "filters": {
+    "access_control": {
+      "allow_servers": ["fetch"],
+      "deny": [],
+      "deny_patterns": ["*__delete_*", "*__drop_*", "*__destroy_*", "*__remove_*", "*send*", "*mail*"]
+    },
+    "load_control": {
+      "deny_url_patterns": ["*"],
+      "deny_names": ["*"],
+      "allow_url_patterns": []
+    },
+    "similarity_threshold": 0.3
+  }
+}

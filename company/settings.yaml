@@ -1,0 +1,22 @@
+instance:
+  name: Executive
+  locale: ro
+  timezone: Europe/Bucharest
+  theme: system
+pack:
+  active: executive
+models:
+  default: claude-sonnet-5
+  deep: claude-opus-5
+  routing: claude-haiku-4-5
+  unknown_model_policy: block
+  caching: true
+tools:
+  mcp_enabled: false
+  web_search: false
+  allow_servers: []
+budget:
+  usd_day: 25
+  per_run_usd: 5
+embed:
+  inbound_enabled: false

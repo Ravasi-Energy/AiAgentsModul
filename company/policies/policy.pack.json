@@ -1,0 +1,7 @@
+{
+  "version": "1",
+  "min_score": 80,
+  "load_mcp_server": "deny",
+  "mcp_enabled_default": false,
+  "exceptions": []
+}
