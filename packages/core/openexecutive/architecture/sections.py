@@ -243,6 +243,17 @@ SECTIONS: list[SectionSpec] = [
         wants_mermaid=True,
         diagram_kind="flowchart",
     ),
+    # `bo` — the BOAgents Valul 1 product slice: tenant-scoped settings,
+    # deterministic BoBots with draft/publish lifecycle, and the injectable
+    # bo.telemetry.v1 adapter. Lives under openexecutive.bo with its own DB.
+    SectionSpec(
+        id="bo_agents",
+        title="BOAgents Slice (Settings + BoBots + Telemetry)",
+        sub="The separable BOAgents product surface: tenant-scoped settings with CAS versioning, deterministic BoBot definitions with three-valued predicates and dry-run simulation, and a disabled-by-default bo.telemetry.v1 adapter.",
+        kb_query="bo settings tenant config_version bobot predicate simulation telemetry adapter draft publish",
+        wants_mermaid=True,
+        diagram_kind="flowchart",
+    ),
 ]
 
 

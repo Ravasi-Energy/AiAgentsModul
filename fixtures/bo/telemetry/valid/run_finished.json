@@ -1,0 +1,21 @@
+{
+  "schemaVersion": "bo.telemetry.v1",
+  "eventId": "evt_demo_rf_0003",
+  "producerId": "boagents",
+  "installationId": "install-demo-01",
+  "tenantRef": "tenant-demo",
+  "product": "BOAgents",
+  "kind": "RunFinished",
+  "occurredAt": "2026-09-21T10:16:01.250Z",
+  "correlationId": "corr_demo_0002",
+  "agentRef": null,
+  "runRef": "run_0123456789ab",
+  "configVersion": 3,
+  "data": {
+    "runRef": "run_0123456789ab",
+    "executionStatus": "SUCCEEDED",
+    "verificationStatus": "VERIFIED",
+    "planHash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "durationMs": 1250
+  }
+}

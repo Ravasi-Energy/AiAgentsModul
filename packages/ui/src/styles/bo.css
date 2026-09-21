@@ -1,0 +1,352 @@
+/* ==========================================================================
+   BO design tokens — Valul 1 pilot profile (isolated & reversible)
+   --------------------------------------------------------------------------
+   Semantic tokens are the single source of truth for the new BO surfaces
+   (`/settings/bo`, `/bo/*`). Everything is scoped under `.bo-scope` so the
+   profile can be lifted out or replaced without touching the host app.
+
+   Themes: dark is the base; light applies via prefers-color-scheme, and an
+   explicit `data-bo-theme="light|dark"` attribute always wins.
+   Breakpoints: 700px / 1100px (per DESIGN.md), coarse pointer handled
+   separately via `@media (pointer: coarse)`.
+   ========================================================================== */
+
+/* Plus Jakarta Sans — local declaration (single declaration site).
+   Files: public/fonts/PlusJakartaSans-{latin,latin-ext}.woff2 (variable 200–800). */
+@font-face {
+  font-family: "Plus Jakarta Sans";
+  font-style: normal;
+  font-weight: 200 800;
+  font-display: swap;
+  src: url("/fonts/PlusJakartaSans-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Plus Jakarta Sans";
+  font-style: normal;
+  font-weight: 200 800;
+  font-display: swap;
+  src: url("/fonts/PlusJakartaSans-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF,
+    U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020,
+    U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
+/* ---- Dark theme (base) ------------------------------------------------- */
+.bo-scope {
+  --bo-bg: #0b0e14;
+  --bo-panel: #131822;
+  --bo-panel-2: #1a2130;
+  --bo-line: #28313f;
+  --bo-line-strong: #5d6f8f;
+  --bo-fg: #eef2f8;
+  --bo-fg-muted: #a5b3c7;
+  --bo-fg-subtle: #8294ab;
+  --bo-accent: #6fa8ff;
+  --bo-accent-hover: #8fbcff;
+  --bo-accent-contrast: #0a1224;
+  --bo-ok: #45d69a;
+  --bo-ok-bg: #103727;
+  --bo-warn: #f2b84b;
+  --bo-warn-bg: #3a2c10;
+  --bo-danger: #f27575;
+  --bo-danger-bg: #401a1e;
+  --bo-info-bg: #16283f;
+  --bo-neutral-bg: #232b3a;
+  --bo-focus: #9ec2ff;
+  --bo-skeleton: #1f2735;
+  --bo-radius: 10px;
+  --bo-font: "Plus Jakarta Sans", system-ui, -apple-system, sans-serif;
+
+  color-scheme: dark;
+}
+
+/* ---- Light theme -------------------------------------------------------- */
+@media (prefers-color-scheme: light) {
+  .bo-scope:not([data-bo-theme]) {
+    --bo-bg: #f4f6f9;
+    --bo-panel: #ffffff;
+    --bo-panel-2: #edf1f6;
+    --bo-line: #d5dce6;
+    --bo-line-strong: #7d8ca0;
+    --bo-fg: #151b24;
+    --bo-fg-muted: #44506a;
+    --bo-fg-subtle: #5d6b82;
+    --bo-accent: #1f5ae0;
+    --bo-accent-hover: #1849bd;
+    --bo-accent-contrast: #ffffff;
+    --bo-ok: #0c7a4d;
+    --bo-ok-bg: #dcf5e9;
+    --bo-warn: #8a5200;
+    --bo-warn-bg: #fbeccf;
+    --bo-danger: #b3261e;
+    --bo-danger-bg: #fbe3e1;
+    --bo-info-bg: #e2ecfd;
+    --bo-neutral-bg: #e6ebf2;
+    --bo-focus: #1f5ae0;
+    --bo-skeleton: #e2e8f0;
+    color-scheme: light;
+  }
+}
+
+.bo-scope[data-bo-theme="light"] {
+  --bo-bg: #f4f6f9;
+  --bo-panel: #ffffff;
+  --bo-panel-2: #edf1f6;
+  --bo-line: #d5dce6;
+  --bo-line-strong: #7d8ca0;
+  --bo-fg: #151b24;
+  --bo-fg-muted: #44506a;
+  --bo-fg-subtle: #5d6b82;
+  --bo-accent: #1f5ae0;
+  --bo-accent-hover: #1849bd;
+  --bo-accent-contrast: #ffffff;
+  --bo-ok: #0c7a4d;
+  --bo-ok-bg: #dcf5e9;
+  --bo-warn: #8a5200;
+  --bo-warn-bg: #fbeccf;
+  --bo-danger: #b3261e;
+  --bo-danger-bg: #fbe3e1;
+  --bo-info-bg: #e2ecfd;
+  --bo-neutral-bg: #e6ebf2;
+  --bo-focus: #1f5ae0;
+  --bo-skeleton: #e2e8f0;
+  color-scheme: light;
+}
+.bo-scope[data-bo-theme="dark"] {
+  color-scheme: dark;
+}
+
+/* ---- Base scope ---------------------------------------------------------- */
+.bo-scope {
+  font-family: var(--bo-font);
+  background: var(--bo-bg);
+  color: var(--bo-fg);
+  min-height: 100%;
+  font-size: 14px;
+  line-height: 1.5;
+}
+.bo-scope :where(a, button, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--bo-focus);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* ---- Layout -------------------------------------------------------------- */
+.bo-page {
+  max-width: 72rem;
+  margin: 0 auto;
+  padding: 20px 16px 48px;
+}
+@media (min-width: 700px) {
+  .bo-page { padding: 28px 24px 64px; }
+}
+@media (min-width: 1100px) {
+  .bo-page { padding: 32px 40px 80px; }
+}
+.bo-page-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+.bo-title { font-size: 20px; font-weight: 700; letter-spacing: -0.01em; }
+@media (min-width: 700px) { .bo-title { font-size: 22px; } }
+.bo-sub { color: var(--bo-fg-muted); font-size: 13px; margin-top: 4px; max-width: 60ch; }
+
+.bo-grid { display: grid; gap: 12px; grid-template-columns: 1fr; }
+@media (min-width: 700px) { .bo-grid-2 { grid-template-columns: 1fr 1fr; } }
+@media (min-width: 1100px) { .bo-grid-3 { grid-template-columns: repeat(3, 1fr); } }
+
+/* ---- Cards / panels -------------------------------------------------------- */
+.bo-card {
+  background: var(--bo-panel);
+  border: 1px solid var(--bo-line);
+  border-radius: var(--bo-radius);
+  padding: 16px;
+}
+@media (min-width: 700px) { .bo-card { padding: 20px; } }
+.bo-card-title { font-size: 15px; font-weight: 600; }
+
+/* ---- Buttons — ≥44px touch targets ----------------------------------------- */
+.bo-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 44px;
+  min-width: 44px;
+  padding: 0 16px;
+  border-radius: var(--bo-radius);
+  border: 1px solid var(--bo-line-strong);
+  background: var(--bo-panel-2);
+  color: var(--bo-fg);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+.bo-btn:hover:not(:disabled) { background: var(--bo-line); }
+.bo-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+.bo-btn--primary {
+  background: var(--bo-accent);
+  border-color: var(--bo-accent);
+  color: var(--bo-accent-contrast);
+}
+.bo-btn--primary:hover:not(:disabled) {
+  background: var(--bo-accent-hover);
+  border-color: var(--bo-accent-hover);
+}
+.bo-btn--icon { padding: 0; }
+
+/* ---- Inputs — ≥40px -------------------------------------------------------- */
+.bo-field { display: grid; gap: 6px; }
+.bo-label { font-size: 13px; font-weight: 600; }
+.bo-hint { font-size: 12px; color: var(--bo-fg-muted); }
+.bo-input,
+.bo-select,
+.bo-textarea {
+  min-height: 40px;
+  padding: 8px 12px;
+  border-radius: var(--bo-radius);
+  border: 1px solid var(--bo-line-strong);
+  background: var(--bo-panel);
+  color: var(--bo-fg);
+  font-family: inherit;
+  font-size: 13px;
+}
+.bo-input:focus, .bo-select:focus, .bo-textarea:focus {
+  border-color: var(--bo-accent);
+}
+.bo-textarea { min-height: 96px; resize: vertical; font-family: ui-monospace, monospace; font-size: 12px; }
+.bo-input[aria-invalid="true"], .bo-select[aria-invalid="true"] {
+  border-color: var(--bo-danger);
+}
+
+/* ---- Pills — state is never colour-only (each pill carries text) ------------ */
+.bo-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 24px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--bo-line-strong);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+.bo-pill--ok { color: var(--bo-ok); background: var(--bo-ok-bg); border-color: var(--bo-ok); }
+.bo-pill--warn { color: var(--bo-warn); background: var(--bo-warn-bg); border-color: var(--bo-warn); }
+.bo-pill--danger { color: var(--bo-danger); background: var(--bo-danger-bg); border-color: var(--bo-danger); }
+.bo-pill--info { color: var(--bo-accent); background: var(--bo-info-bg); border-color: var(--bo-accent); }
+.bo-pill--neutral { color: var(--bo-fg-muted); background: var(--bo-neutral-bg); }
+
+/* ---- Tabs ------------------------------------------------------------------- */
+.bo-tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--bo-line);
+  margin-bottom: 20px;
+  overflow-x: auto;
+}
+.bo-tab {
+  min-height: 44px;
+  padding: 0 14px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--bo-fg-muted);
+  border-bottom: 2px solid transparent;
+  white-space: nowrap;
+}
+.bo-tab:hover { color: var(--bo-fg); }
+.bo-tab[aria-selected="true"] {
+  color: var(--bo-fg);
+  border-bottom-color: var(--bo-accent);
+}
+
+/* ---- Table — local scroll, no page overflow --------------------------------- */
+.bo-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--bo-line);
+  border-radius: var(--bo-radius);
+  background: var(--bo-panel);
+}
+.bo-table { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 560px; }
+.bo-table th {
+  text-align: left;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--bo-fg-muted);
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--bo-line);
+  white-space: nowrap;
+}
+.bo-table td {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--bo-line);
+  vertical-align: top;
+}
+.bo-table tr:last-child td { border-bottom: 0; }
+
+/* ---- Alerts / states -------------------------------------------------------- */
+.bo-alert {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 12px 14px;
+  border-radius: var(--bo-radius);
+  border: 1px solid var(--bo-line-strong);
+  background: var(--bo-panel-2);
+  font-size: 13px;
+}
+.bo-alert--danger { border-color: var(--bo-danger); background: var(--bo-danger-bg); }
+.bo-alert--warn { border-color: var(--bo-warn); background: var(--bo-warn-bg); }
+.bo-alert--info { border-color: var(--bo-accent); background: var(--bo-info-bg); }
+
+.bo-empty {
+  padding: 40px 20px;
+  text-align: center;
+  color: var(--bo-fg-muted);
+  border: 1px dashed var(--bo-line-strong);
+  border-radius: var(--bo-radius);
+  font-size: 13px;
+}
+
+.bo-skeleton {
+  border-radius: var(--bo-radius);
+  background: var(--bo-skeleton);
+  min-height: 16px;
+  animation: bo-pulse 1.4s ease-in-out infinite;
+}
+@keyframes bo-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .bo-skeleton { animation: none; }
+}
+
+/* ---- Misc ------------------------------------------------------------------- */
+.bo-mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; }
+.bo-muted { color: var(--bo-fg-muted); }
+.bo-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.bo-spread { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.bo-kv { display: grid; grid-template-columns: minmax(120px, 200px) 1fr; gap: 4px 16px; font-size: 13px; }
+.bo-kv dt { color: var(--bo-fg-muted); }
+.bo-kv dd { margin: 0; }
+
+/* Coarse pointer: larger gaps so 44px targets don't crowd. */
+@media (pointer: coarse) {
+  .bo-scope .bo-btn { min-height: 48px; }
+  .bo-scope .bo-tab { min-height: 48px; }
+}

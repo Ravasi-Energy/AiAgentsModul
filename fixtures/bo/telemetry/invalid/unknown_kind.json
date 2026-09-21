@@ -1,0 +1,12 @@
+{
+  "schemaVersion": "bo.telemetry.v1",
+  "eventId": "evt_bad_0002",
+  "producerId": "boagents",
+  "installationId": "install-demo-01",
+  "tenantRef": "tenant-demo",
+  "product": "BOAgents",
+  "kind": "CustomEvent",
+  "occurredAt": "2026-09-21T10:15:00.000Z",
+  "correlationId": "corr_bad_0002",
+  "data": {"sequence": 1, "status": "HEALTHY", "observedAt": "2026-09-21T10:15:00.000Z"}
+}

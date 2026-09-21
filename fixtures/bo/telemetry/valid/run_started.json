@@ -1,0 +1,20 @@
+{
+  "schemaVersion": "bo.telemetry.v1",
+  "eventId": "evt_demo_rs_0002",
+  "producerId": "boagents",
+  "installationId": "install-demo-01",
+  "tenantRef": "tenant-demo",
+  "product": "BOAgents",
+  "kind": "RunStarted",
+  "occurredAt": "2026-09-21T10:16:00.000Z",
+  "correlationId": "corr_demo_0002",
+  "agentRef": null,
+  "runRef": "run_0123456789ab",
+  "configVersion": 3,
+  "data": {
+    "runRef": "run_0123456789ab",
+    "definitionRef": "bot_abcdef012345",
+    "versionNo": 2,
+    "runKind": "simulation"
+  }
+}

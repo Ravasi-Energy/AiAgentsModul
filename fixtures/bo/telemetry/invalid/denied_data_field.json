@@ -1,0 +1,18 @@
+{
+  "schemaVersion": "bo.telemetry.v1",
+  "eventId": "evt_bad_0007",
+  "producerId": "boagents",
+  "installationId": "install-demo-01",
+  "tenantRef": "tenant-demo",
+  "product": "BOAgents",
+  "kind": "VerificationFinding",
+  "occurredAt": "2026-09-21T10:15:00.000Z",
+  "correlationId": "corr_bad_0007",
+  "data": {
+    "findingId": "f-001",
+    "category": "security",
+    "severity": "critical",
+    "effectStatus": "EXECUTED",
+    "prompt": "system prompt leaked into telemetry"
+  }
+}

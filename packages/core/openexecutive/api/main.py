@@ -21,6 +21,7 @@ from openexecutive.api.routes import (
     architecture,
     artifacts,
     audit,
+    bo,
     chat,
     clients,
     company_profile,
@@ -371,6 +372,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     initialize_db()
     initialize_alerts_db()
+
+    # BOAgents slice: own database file (bo_agents.db / BOAGENTS_DB_PATH).
+    from openexecutive.bo.db import initialize_db as initialize_bo_db
+    initialize_bo_db()
 
     # User-generated company fixtures (DB-backed; persists on the data volume).
     from openexecutive.fixtures.store import initialize_db as initialize_fixtures_db
@@ -834,6 +839,8 @@ def create_app() -> FastAPI:
     app.include_router(architecture.router, tags=["architecture"])
     app.include_router(guide.router, tags=["guide"])
     app.include_router(health.router, tags=["health"])
+    app.include_router(bo.router, tags=["bo"])
+    bo.register_error_handlers(app)
 
     # Expose Open Executive as an MCP server at /mcp (Streamable-HTTP). Gated
     # by the same shared-secret middleware as every other route — clients pass

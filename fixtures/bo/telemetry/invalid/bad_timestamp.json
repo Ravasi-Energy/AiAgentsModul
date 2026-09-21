@@ -1,0 +1,12 @@
+{
+  "schemaVersion": "bo.telemetry.v1",
+  "eventId": "evt_bad_0005",
+  "producerId": "boagents",
+  "installationId": "install-demo-01",
+  "tenantRef": "tenant-demo",
+  "product": "BOAgents",
+  "kind": "Heartbeat",
+  "occurredAt": "21/09/2026 10:15",
+  "correlationId": "corr_bad_0005",
+  "data": {"sequence": 1, "status": "HEALTHY", "observedAt": "2026-09-21T10:15:00.000Z"}
+}

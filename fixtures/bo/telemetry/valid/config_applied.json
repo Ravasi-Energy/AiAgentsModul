@@ -1,0 +1,20 @@
+{
+  "schemaVersion": "bo.telemetry.v1",
+  "eventId": "evt_demo_ca_0005",
+  "producerId": "boagents",
+  "installationId": "install-demo-01",
+  "tenantRef": "tenant-demo",
+  "product": "BOAgents",
+  "kind": "ConfigApplied",
+  "occurredAt": "2026-09-21T10:17:00.000Z",
+  "correlationId": "corr_demo_0003",
+  "agentRef": null,
+  "runRef": null,
+  "configVersion": 4,
+  "data": {
+    "key": "bo.ui.language",
+    "configVersion": 4,
+    "applyMode": "IMMEDIATE",
+    "actorRef": "admin@example.test"
+  }
+}

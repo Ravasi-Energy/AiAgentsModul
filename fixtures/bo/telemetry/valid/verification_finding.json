@@ -1,0 +1,22 @@
+{
+  "schemaVersion": "bo.telemetry.v1",
+  "eventId": "evt_demo_vf_0004",
+  "producerId": "boagents",
+  "installationId": "install-demo-01",
+  "tenantRef": "tenant-demo",
+  "product": "BOAgents",
+  "kind": "VerificationFinding",
+  "occurredAt": "2026-09-21T10:16:01.000Z",
+  "correlationId": "corr_demo_0002",
+  "agentRef": null,
+  "runRef": "run_0123456789ab",
+  "configVersion": 3,
+  "data": {
+    "findingId": "run_0123456789ab:heartbeat-stale",
+    "category": "availability",
+    "severity": "warning",
+    "effectStatus": "NOT_EXECUTED",
+    "ownerRef": "admin@example.test",
+    "evidenceRefs": ["run_0123456789ab"]
+  }
+}

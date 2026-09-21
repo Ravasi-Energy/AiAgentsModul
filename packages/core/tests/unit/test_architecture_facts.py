@@ -50,6 +50,10 @@ def test_sections_have_unique_stable_ids() -> None:
         # `clients` — named client-company slots for fractional / multi-client
         # use (save-back switching, per-client MCP config). New top-level module.
         "clients",
+        # `bo_agents` — the BOAgents Valul 1 product slice (tenant-scoped
+        # settings, deterministic BoBots, telemetry adapter). New top-level
+        # module under openexecutive.bo.
+        "bo_agents",
     ]
 
 
