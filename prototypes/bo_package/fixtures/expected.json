@@ -1,0 +1,71 @@
+{
+  "_nota": "verdictul așteptat per caz — separat de pachete, ca să nu conteze drept artefact nesemnat",
+  "cases": {
+    "valid-bobot": {
+      "verdict": "ACCEPT"
+    },
+    "bad-signature": {
+      "verdict": "REJECT",
+      "code": "BAD_SIGNATURE"
+    },
+    "tampered-artifact": {
+      "verdict": "REJECT",
+      "code": "ARTIFACT_MODIFIED"
+    },
+    "missing-artifact": {
+      "verdict": "REJECT",
+      "code": "ARTIFACT_MISSING"
+    },
+    "unsigned-artifact": {
+      "verdict": "REJECT",
+      "code": "UNSIGNED_ARTIFACT"
+    },
+    "unknown-signer": {
+      "verdict": "REJECT",
+      "code": "PUBLISHER_UNKNOWN"
+    },
+    "suspended-publisher": {
+      "verdict": "REJECT",
+      "code": "PUBLISHER_SUSPENDED"
+    },
+    "revoked-key": {
+      "verdict": "REJECT",
+      "code": "KEY_REVOKED"
+    },
+    "expired-key": {
+      "verdict": "REJECT",
+      "code": "KEY_EXPIRED"
+    },
+    "incompatible-host": {
+      "verdict": "REJECT",
+      "code": "INCOMPATIBLE"
+    },
+    "unknown-capability": {
+      "verdict": "REJECT",
+      "code": "CAPABILITY_UNKNOWN"
+    },
+    "excessive-capabilities": {
+      "verdict": "REJECT",
+      "code": "CAPABILITY_EXCESSIVE"
+    },
+    "rollback-unauthorized": {
+      "verdict": "REJECT",
+      "code": "ROLLBACK_UNAUTHORIZED"
+    },
+    "rollback-approved": {
+      "verdict": "ACCEPT"
+    },
+    "traversal": {
+      "verdict": "REJECT",
+      "code": "TRAVERSAL"
+    },
+    "malformed-manifest": {
+      "verdict": "REJECT",
+      "code": "INVALID_MANIFEST"
+    },
+    "extra-field": {
+      "verdict": "REJECT",
+      "code": "INVALID_MANIFEST"
+    }
+  }
+}

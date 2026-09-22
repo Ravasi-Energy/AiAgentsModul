@@ -1,0 +1,82 @@
+{
+  "schemaVersion": "bo.package.registry.v1",
+  "registryId": "reg-fixture",
+  "updatedAt": "2026-09-23T00:00:00Z",
+  "publishers": [
+    {
+      "publisherId": "pub-bo",
+      "status": "active",
+      "allowedKinds": [
+        "bobot",
+        "agent"
+      ],
+      "keyIds": [
+        "key-active",
+        "key-revoked",
+        "key-expired"
+      ]
+    },
+    {
+      "publisherId": "pub-suspended",
+      "status": "suspended",
+      "allowedKinds": [
+        "bobot"
+      ],
+      "keyIds": []
+    }
+  ],
+  "keys": [
+    {
+      "keyId": "key-active",
+      "algorithm": "ed25519",
+      "publicKey": "QYvDIHuzuo/gBfxERTc5qLVhzHdYoMdNOxJoXJV9c/w=",
+      "status": "active",
+      "notBefore": "2026-01-01T00:00:00Z",
+      "notAfter": null
+    },
+    {
+      "keyId": "key-revoked",
+      "algorithm": "ed25519",
+      "publicKey": "QV0wXzs+lc6/+5vwswSff5WlHS13IfL+JEMYVoSvupE=",
+      "status": "revoked",
+      "notBefore": "2026-01-01T00:00:00Z",
+      "notAfter": null
+    },
+    {
+      "keyId": "key-expired",
+      "algorithm": "ed25519",
+      "publicKey": "cK4Q6HEGs+RNdN6Gy5QdWZx3zujlWBysmvSQRO9oiMU=",
+      "status": "active",
+      "notBefore": "2026-01-01T00:00:00Z",
+      "notAfter": "2026-06-01T00:00:00Z"
+    }
+  ],
+  "policy": {
+    "allowedKinds": [
+      "bobot",
+      "agent",
+      "workflow"
+    ],
+    "capabilityCatalog": [
+      "bots:simulate",
+      "bots:write",
+      "settings:read",
+      "notify:internal",
+      "files:read"
+    ],
+    "maxCapabilitiesPerKind": {
+      "bobot": 3,
+      "agent": 8,
+      "workflow": 8
+    },
+    "maxPackageBytes": 1048576,
+    "rollbackRequiresApproval": true,
+    "approvedRollbacks": [
+      {
+        "packageId": "pkg.demo-bot",
+        "toVersion": "1.0.0",
+        "approvalRef": "apr-fixture-001"
+      }
+    ]
+  }
+}
