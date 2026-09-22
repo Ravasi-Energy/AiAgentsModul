@@ -8,7 +8,7 @@ Codex).
 | Repository | `Ravasi-Energy/BOAgents` |
 | Branch | `bo/val2-01-a01-packages` |
 | baseSHA | `46424b5c865bde7e74d3c9f56ea148fc0ae8a4c0` |
-| headSHA | `214b1f8` |
+| headSHA | `214b1f8` (implementare) + raportul — vârf la predare: `git rev-parse bo/val2-01-a01-packages` |
 | PR | https://github.com/Ravasi-Energy/BOAgents/pull/5 (draft, bază `main`) |
 | Artefact comun | `coordonare/contracte/bo.package.v1/` (cu SHA256SUMS) |
 
@@ -76,6 +76,6 @@ Codex).
 
 ## Artefacte
 
-- Bundle: `agenti/BO-A01/bo-a01-val2-01.bundle` _(SHA256 în MANIFEST)_
+- Bundle: `.bundle-uri/bo-a01-val2-01.bundle` _(SHA256 în coordonare/rapoarte/BO-A01/PROGRES.md)_
 - Probe: `rapoarte/BO-A01/VAL2-01/probe-ui/` (11 capturi + rezultate)
 - Contract comun: `coordonare/contracte/bo.package.v1/` (SHA256SUMS inclus)
