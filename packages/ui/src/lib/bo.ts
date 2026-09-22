@@ -41,7 +41,7 @@ async function req<T>(
 export interface BoSetting {
   key: string;
   schema_version: string;
-  type: "text" | "enum" | "integer" | "timezone";
+  type: "text" | "enum" | "integer" | "timezone" | "boolean";
   default: unknown;
   apply_mode: "IMMEDIATE" | "NEW_RUN" | "RESTART" | "MIGRATION";
   scope: string;
@@ -250,4 +250,109 @@ export interface BoTelemetryStatus {
 
 export function getBoTelemetryStatus(): Promise<BoTelemetryStatus> {
   return req("/telemetry/status");
+}
+
+// ---------------------------------------------------------------------------
+// Signed packages (bo.package.v1) — VAL2-01. Import is disabled by default and
+// every response carries the verifier verdict; rejected imports stay auditable.
+// ---------------------------------------------------------------------------
+
+export interface BoPackageVerdict {
+  verdict: "ACCEPT" | "REJECT";
+  reasons: string[];
+  packageId: string | null;
+  version: string | null;
+  manifestDigest: string | null;
+  artifactSetDigest: string | null;
+  tenantRef: string | null;
+  publisherId: string | null;
+  keyId: string | null;
+  policyVersion: string | null;
+  trustVersion: string | null;
+  checkedAt: string | null;
+  expiresAt: string | null;
+  idempotent: boolean;
+}
+
+export interface BoPackageImport {
+  id: string;
+  tenant: string;
+  package_id: string;
+  version: string;
+  kind: string;
+  publisher_id: string;
+  key_id: string;
+  manifest_digest: string;
+  artifact_set_digest: string;
+  status: "QUARANTINED" | "DRAFT" | "REJECTED";
+  verdict: BoPackageVerdict;
+  source_path: string;
+  stored_path: string | null;
+  approval_id: string | null;
+  actor: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BoPackageApproval {
+  id: string;
+  tenant: string;
+  package_id: string;
+  from_version: string;
+  to_version: string;
+  artifact_set_digest: string;
+  status: "active" | "revoked";
+  expires_at: string;
+  consumed_at: string | null;
+  consumed_by_import: string | null;
+  created_by: string;
+  created_at: string;
+}
+
+export function listBoPackageImports(): Promise<{ imports: BoPackageImport[] }> {
+  return req("/packages");
+}
+
+export function getBoPackageImport(
+  id: string,
+): Promise<BoPackageImport & { idempotent?: boolean }> {
+  return req(`/packages/${id}`);
+}
+
+export function importBoPackage(
+  sourceDir: string,
+): Promise<BoPackageImport & { verdict: BoPackageVerdict; idempotent: boolean }> {
+  return req("/packages/import", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ source_dir: sourceDir }),
+  });
+}
+
+export function promoteBoPackage(id: string): Promise<BoPackageImport> {
+  return req(`/packages/${id}/promote`, { method: "POST" });
+}
+
+export function listBoPackageApprovals(): Promise<{
+  approvals: BoPackageApproval[];
+}> {
+  return req("/packages-approvals");
+}
+
+export function createBoPackageApproval(payload: {
+  package_id: string;
+  from_version: string;
+  to_version: string;
+  artifact_set_digest: string;
+  expires_at: string;
+}): Promise<BoPackageApproval> {
+  return req("/packages-approvals", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export function revokeBoPackageApproval(id: string): Promise<{ ok: boolean }> {
+  return req(`/packages-approvals/${id}/revoke`, { method: "POST" });
 }
