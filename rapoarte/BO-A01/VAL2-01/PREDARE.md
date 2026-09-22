@@ -8,7 +8,8 @@ Codex).
 | Repository | `Ravasi-Energy/BOAgents` |
 | Branch | `bo/val2-01-a01-packages` |
 | baseSHA | `46424b5c865bde7e74d3c9f56ea148fc0ae8a4c0` |
-| headSHA | _(completat la commit)_ |
+| headSHA | `214b1f8` |
+| PR | https://github.com/Ravasi-Energy/BOAgents/pull/5 (draft, bază `main`) |
 | Artefact comun | `coordonare/contracte/bo.package.v1/` (cu SHA256SUMS) |
 
 ## Cerințe acoperite
