@@ -29,7 +29,7 @@ from openexecutive.bo.bots import service as bot_service
 from openexecutive.bo.bots import store as bot_store
 from openexecutive.bo.settings import store as settings_store
 from openexecutive.bo.settings.registry import SettingValidationError
-from openexecutive.bo.telemetry.adapter import get_adapter
+from openexecutive.bo.telemetry.adapter import get_adapter, opaque_actor_ref
 from openexecutive.bo.telemetry.schema import TelemetrySchemaError
 
 logger = logging.getLogger(__name__)
@@ -164,13 +164,19 @@ def put_setting(key: str, body: _SettingPatch,
 def _config_applied(ident: bo_identity.Identity, key: str,
                     record: dict[str, Any]) -> None:
     """Emit ConfigApplied for IMMEDIATE settings — through the adapter, so it
-    is a no-op unless telemetry is explicitly enabled."""
+    is a no-op unless telemetry is explicitly enabled. VAL1-02 contract:
+    configVersion is the opaque string of the tenant config version, the
+    per-key applied version rides in appliedVersion, and actorRef is an
+    opaque server-derived ref — never the email."""
     if record["apply_mode"] != "IMMEDIATE":
         return
     try:
         get_adapter().emit(tenant=ident.tenant, kind="ConfigApplied", data={
-            "key": key, "configVersion": record["version"],
-            "applyMode": "IMMEDIATE", "actorRef": ident.actor,
+            "key": key,
+            "configVersion": str(settings_store.config_version(ident.tenant)),
+            "applyMode": "IMMEDIATE",
+            "appliedVersion": record["version"],
+            "actorRef": opaque_actor_ref(ident.actor),
         })
     except Exception:  # noqa: BLE001 — telemetry never breaks the write path
         logger.warning("ConfigApplied emit failed", exc_info=True)

@@ -1,20 +1,20 @@
 {
   "schemaVersion": "bo.telemetry.v1",
-  "eventId": "evt_demo_rs_0002",
+  "eventId": "evt_d73df903c7094eab85ac8943",
   "producerId": "boagents",
-  "installationId": "install-demo-01",
-  "tenantRef": "tenant-demo",
+  "installationId": "install-fixture",
+  "tenantRef": "tenant-fixture",
   "product": "BOAgents",
   "kind": "RunStarted",
-  "occurredAt": "2026-09-21T10:16:00.000Z",
-  "correlationId": "corr_demo_0002",
-  "agentRef": null,
-  "runRef": "run_0123456789ab",
-  "configVersion": 3,
+  "occurredAt": "2026-09-22T08:09:36.928Z",
+  "correlationId": "run_fixture01",
+  "agentRef": "bot_fixture01",
+  "runRef": "run_fixture01",
+  "configVersion": "1",
   "data": {
-    "runRef": "run_0123456789ab",
-    "definitionRef": "bot_abcdef012345",
-    "versionNo": 2,
+    "trigger": "manual",
+    "definitionRef": "bot_fixture01",
+    "versionNo": 3,
     "runKind": "simulation"
   }
 }

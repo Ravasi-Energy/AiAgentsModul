@@ -1,14 +1,31 @@
-"""``bo.telemetry.v1`` event validation — CONTRACTE-V1, telemetry section.
+"""``bo.telemetry.v1`` event validation — CONTRACTE-V1 + decizia VAL1-02.
 
 Strict, closed-world validation: every field is required or explicitly
 nullable, unknown fields are rejected (the schema accepts *only* the agreed
-shape — "fixture acceptă numai schema convenită"), enums are exact, and
-timestamps must be RFC3339 UTC. The canonical JSON Schema artifact ships at
+shape — "fixture acceptă numai schema convenită"), enums are exact, numbers
+reject bool, and timestamps must carry an explicit UTC zone. The canonical
+JSON Schema artifact ships at
 ``fixtures/bo/telemetry/bo.telemetry.v1.schema.json``; this module is the
 runtime gate and stays in lockstep via the fixture tests.
+
+VAL1-02 contract decisions encoded here:
+- ``configVersion`` is an opaque non-empty string (envelope + ConfigApplied);
+  the internal numeric settings version is serialized explicitly at emit.
+- ``correlationId`` + ``configVersion`` required; ``agentRef``/``runRef``
+  nullable; ``runRef`` required non-empty for run events.
+- The run reference lives in the envelope — never duplicated inside data.
+- RunStarted.data ⊆ {trigger, definitionRef, versionNo, runKind}, all
+  optional, no user input.
+- RunFinished.data requires executionStatus + verificationStatus; optional
+  planHash (sha256) and finite durationMs >= 0.
+- VerificationFinding requires ownerRef, severity in
+  INFO/LOW/MEDIUM/HIGH/CRITICAL, evidenceRefs list (max 32 refs x 128 chars).
+- ConfigApplied.data requires key, configVersion, applyMode, appliedVersion
+  (nullable); actorRef is an opaque server-derived ref, never an email.
 """
 from __future__ import annotations
 
+import math
 import re
 from datetime import datetime
 from typing import Any
@@ -22,10 +39,13 @@ HEARTBEAT_STATUS = ("HEALTHY", "DEGRADED", "UNAVAILABLE")
 EXECUTION_STATUS = ("SUCCEEDED", "PARTIAL", "FAILED", "CANCELLED", "UNKNOWN")
 VERIFICATION_STATUS = ("VERIFIED", "PENDING", "MISMATCH", "UNKNOWN")
 EFFECT_STATUS = ("NOT_EXECUTED", "EXECUTED", "PARTIAL", "UNKNOWN")
+SEVERITY = ("INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL")
+APPLY_MODE = ("IMMEDIATE", "NEW_RUN", "RESTART", "MIGRATION")
+RUN_KINDS = ("RunStarted", "RunFinished")
 
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _RFC3339_RE = re.compile(
-    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$"
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|\+00:00)$"
 )
 
 
@@ -44,12 +64,18 @@ def _check_id(v: Any, field: str) -> None:
 
 def _check_ts(v: Any, field: str) -> None:
     if not isinstance(v, str) or not _RFC3339_RE.match(v):
-        _err(f"{field}: așteptat timestamp RFC3339")
+        _err(f"{field}: așteptat timestamp RFC3339 cu fus UTC explicit")
     else:
         try:
             datetime.fromisoformat(v.replace("Z", "+00:00"))
         except ValueError:
             _err(f"{field}: timestamp imposibil")
+
+
+def _check_opaque(v: Any, field: str, *, max_len: int = 128) -> None:
+    """Opaque non-empty string (contract: configVersion, opaque refs)."""
+    if not isinstance(v, str) or not v or len(v) > max_len:
+        _err(f"{field}: referință opacă invalidă")
 
 
 def _check_str(v: Any, field: str, *, nullable: bool = False, max_len: int = 512) -> None:
@@ -72,21 +98,22 @@ _ENVELOPE_FIELDS = {
 
 _DATA_FIELDS: dict[str, set[str]] = {
     "Heartbeat": {"sequence", "status", "observedAt"},
-    "RunStarted": {"runRef", "definitionRef", "versionNo", "runKind"},
-    "RunFinished": {"runRef", "executionStatus", "verificationStatus",
+    "RunStarted": {"trigger", "definitionRef", "versionNo", "runKind"},
+    "RunFinished": {"executionStatus", "verificationStatus",
                     "planHash", "durationMs"},
     "VerificationFinding": {"findingId", "category", "severity",
                             "effectStatus", "ownerRef", "evidenceRefs"},
-    "ConfigApplied": {"key", "configVersion", "applyMode", "actorRef"},
+    "ConfigApplied": {"key", "configVersion", "applyMode", "appliedVersion",
+                      "actorRef"},
 }
 
 _DATA_REQUIRED: dict[str, set[str]] = {
     "Heartbeat": {"sequence", "status", "observedAt"},
-    "RunStarted": {"runRef"},
-    "RunFinished": {"runRef", "executionStatus", "verificationStatus"},
+    "RunStarted": set(),
+    "RunFinished": {"executionStatus", "verificationStatus"},
     "VerificationFinding": {"findingId", "category", "severity",
-                            "effectStatus"},
-    "ConfigApplied": {"key", "configVersion", "applyMode"},
+                            "effectStatus", "ownerRef"},
+    "ConfigApplied": {"key", "configVersion", "applyMode", "appliedVersion"},
 }
 
 # Field-name denylist inside `data` — the default payload must never carry
@@ -120,7 +147,8 @@ def _validate_data(kind: str, data: Any) -> None:
         _check_enum(data["status"], "Heartbeat.status", HEARTBEAT_STATUS)
         _check_ts(data["observedAt"], "Heartbeat.observedAt")
     elif kind == "RunStarted":
-        _check_id(data["runRef"], "RunStarted.runRef")
+        if "trigger" in data:
+            _check_str(data["trigger"], "RunStarted.trigger", max_len=64)
         if "definitionRef" in data:
             _check_id(data["definitionRef"], "RunStarted.definitionRef")
         if "versionNo" in data:
@@ -130,7 +158,6 @@ def _validate_data(kind: str, data: Any) -> None:
         if "runKind" in data:
             _check_str(data["runKind"], "RunStarted.runKind", max_len=64)
     elif kind == "RunFinished":
-        _check_id(data["runRef"], "RunFinished.runRef")
         _check_enum(data["executionStatus"], "executionStatus", EXECUTION_STATUS)
         _check_enum(data["verificationStatus"], "verificationStatus",
                     VERIFICATION_STATUS)
@@ -140,30 +167,34 @@ def _validate_data(kind: str, data: Any) -> None:
                 _err("RunFinished.planHash: sha256 hex")
         if "durationMs" in data:
             d = data["durationMs"]
-            if not isinstance(d, (int, float)) or isinstance(d, bool) or d < 0:
-                _err("RunFinished.durationMs: număr >= 0")
+            if (not isinstance(d, (int, float)) or isinstance(d, bool)
+                    or not math.isfinite(d) or d < 0):
+                _err("RunFinished.durationMs: număr finit >= 0")
     elif kind == "VerificationFinding":
         _check_id(data["findingId"], "findingId")
         _check_str(data["category"], "category", max_len=64)
-        _check_str(data["severity"], "severity", max_len=32)
+        _check_enum(data["severity"], "severity", SEVERITY)
         _check_enum(data["effectStatus"], "effectStatus", EFFECT_STATUS)
-        if "ownerRef" in data:
-            _check_str(data["ownerRef"], "ownerRef", max_len=256)
+        _check_opaque(data["ownerRef"], "ownerRef", max_len=256)
         if "evidenceRefs" in data:
             ev = data["evidenceRefs"]
-            if not isinstance(ev, list) or len(ev) > 50:
-                _err("evidenceRefs: listă max 50")
+            if not isinstance(ev, list) or len(ev) > 32:
+                _err("evidenceRefs: listă max 32 referințe")
             for ref in ev:
-                _check_str(ref, "evidenceRefs[]", max_len=256)
+                _check_opaque(ref, "evidenceRefs[]", max_len=128)
     elif kind == "ConfigApplied":
         _check_str(data["key"], "key", max_len=128)
-        cv = data["configVersion"]
-        if not isinstance(cv, int) or isinstance(cv, bool) or cv < 0:
-            _err("ConfigApplied.configVersion: întreg >= 0")
-        _check_enum(data["applyMode"], "applyMode",
-                    ("IMMEDIATE", "NEW_RUN", "RESTART", "MIGRATION"))
+        _check_opaque(data["configVersion"], "ConfigApplied.configVersion")
+        _check_enum(data["applyMode"], "applyMode", APPLY_MODE)
+        av = data["appliedVersion"]
+        if av is not None and (
+                not isinstance(av, int) or isinstance(av, bool) or av < 0):
+            _err("ConfigApplied.appliedVersion: întreg >= 0 sau null")
         if "actorRef" in data:
-            _check_str(data["actorRef"], "actorRef", max_len=256)
+            ref = data["actorRef"]
+            _check_str(ref, "actorRef", max_len=256)
+            if "@" in ref:
+                _err("actorRef: trebuie referință opacă, nu email")
 
 
 def validate_event(event: Any) -> dict[str, Any]:
@@ -187,13 +218,15 @@ def validate_event(event: Any) -> dict[str, Any]:
     _check_enum(event["product"], "product", PRODUCTS)
     _check_enum(event["kind"], "kind", KINDS)
     _check_ts(event["occurredAt"], "occurredAt")
+    for required in ("configVersion",):
+        if required not in event:
+            _err(f"lipsește {required}")
+    _check_opaque(event["configVersion"], "configVersion")
     if "agentRef" in event and event["agentRef"] is not None:
         _check_id(event["agentRef"], "agentRef")
     if "runRef" in event and event["runRef"] is not None:
         _check_id(event["runRef"], "runRef")
-    if "configVersion" in event and event["configVersion"] is not None:
-        cv = event["configVersion"]
-        if not isinstance(cv, int) or isinstance(cv, bool) or cv < 0:
-            _err("configVersion: întreg >= 0")
+    if event["kind"] in RUN_KINDS and not event.get("runRef"):
+        _err(f"{event['kind']}: runRef obligatoriu nevid în envelopă")
     _validate_data(event["kind"], event["data"])
     return event

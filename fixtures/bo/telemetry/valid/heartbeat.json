@@ -1,19 +1,19 @@
 {
   "schemaVersion": "bo.telemetry.v1",
-  "eventId": "evt_demo_hb_0001",
+  "eventId": "evt_8ff20dd9e3be461b8e51e506",
   "producerId": "boagents",
-  "installationId": "install-demo-01",
-  "tenantRef": "tenant-demo",
+  "installationId": "install-fixture",
+  "tenantRef": "tenant-fixture",
   "product": "BOAgents",
   "kind": "Heartbeat",
-  "occurredAt": "2026-09-21T10:15:00.000Z",
-  "correlationId": "corr_demo_0001",
-  "agentRef": "agent-supervisor-01",
+  "occurredAt": "2026-09-22T08:09:36.928Z",
+  "correlationId": "corr_28a6efde851c472ca06b4bdf",
+  "agentRef": null,
   "runRef": null,
-  "configVersion": 3,
+  "configVersion": "1",
   "data": {
-    "sequence": 42,
+    "sequence": 12,
     "status": "HEALTHY",
-    "observedAt": "2026-09-21T10:14:59.500Z"
+    "observedAt": "2026-09-22T08:00:00Z"
   }
 }

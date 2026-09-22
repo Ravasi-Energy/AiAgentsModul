@@ -12,6 +12,7 @@ deployment config) — never trusted from caller-supplied payload.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -26,6 +27,16 @@ from openexecutive.bo.telemetry import schema
 logger = logging.getLogger(__name__)
 
 _PRODUCT = "BOAgents"
+
+
+def opaque_actor_ref(actor: str) -> str:
+    """Server-derived opaque ref for actorRef/ownerRef — never the email.
+
+    Deterministic (same actor -> same ref) so findings can be correlated,
+    but not reversible and carries no personal data on the wire.
+    """
+    digest = hashlib.sha256(actor.encode("utf-8")).hexdigest()[:20]
+    return f"actor_{digest}"
 
 
 class Transport(Protocol):
@@ -117,6 +128,9 @@ class TelemetryAdapter:
             config_version = settings_store.config_version(tenant, db_path=db_path)
         except Exception:  # noqa: BLE001 — telemetry must survive a settings
             config_version = 0   # store hiccup; it never gates the product
+        # Contract: configVersion is an opaque non-empty string on the wire;
+        # the internal numeric version is serialized explicitly here.
+        config_version_str = str(config_version)
         event = {
             "schemaVersion": schema.SCHEMA_VERSION,
             "eventId": f"evt_{uuid.uuid4().hex[:24]}",
@@ -131,7 +145,7 @@ class TelemetryAdapter:
             "correlationId": correlation_id or f"corr_{uuid.uuid4().hex[:24]}",
             "agentRef": agent_ref,
             "runRef": run_ref,
-            "configVersion": config_version,
+            "configVersion": config_version_str,
             "data": data,
         }
         try:

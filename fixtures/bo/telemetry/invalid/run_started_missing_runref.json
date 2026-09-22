@@ -1,0 +1,20 @@
+{
+  "schemaVersion": "bo.telemetry.v1",
+  "eventId": "evt_d73df903c7094eab85ac8943",
+  "producerId": "boagents",
+  "installationId": "install-fixture",
+  "tenantRef": "tenant-fixture",
+  "product": "BOAgents",
+  "kind": "RunStarted",
+  "occurredAt": "2026-09-22T08:09:36.928Z",
+  "correlationId": "run_fixture01",
+  "agentRef": "bot_fixture01",
+  "runRef": null,
+  "configVersion": "1",
+  "data": {
+    "trigger": "manual",
+    "definitionRef": "bot_fixture01",
+    "versionNo": 3,
+    "runKind": "simulation"
+  }
+}

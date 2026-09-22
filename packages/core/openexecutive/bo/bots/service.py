@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,7 @@ from openexecutive.bo.bots.models import (
 )
 from openexecutive.bo.bots.predicates import PredicateError, Tri, _validate, evaluate
 from openexecutive.bo.settings import store as settings_store
+from openexecutive.bo.telemetry.adapter import opaque_actor_ref
 
 
 class ValidationFailure(ValueError):
@@ -228,12 +230,14 @@ def simulate(
 
     # Telemetry: emitted through the injectable adapter — dropped unless an
     # operator configured a transport (default: off). run_id is pre-generated
-    # so RunStarted can name the run it announces.
+    # so RunStarted can name the run it announces. The run reference lives in
+    # the envelope (runRef), never inside data — VAL1-02 contract.
     run_id = f"run_{uuid.uuid4().hex[:12]}"
+    started_at = time.monotonic()
     _emit(tenant, "RunStarted", {
-        "runRef": run_id, "definitionRef": def_id,
+        "trigger": "manual", "definitionRef": def_id,
         "versionNo": version["version_no"], "runKind": "simulation",
-    })
+    }, run_ref=run_id, agent_ref=def_id, correlation_id=run_id)
 
     context = dict(input_context)
     predicate_result = "NOT_EVALUATED"
@@ -366,16 +370,18 @@ def simulate(
     store.insert_step_runs(run_id, step_records, db_path=db_path)
 
     _emit(tenant, "RunFinished", {
-        "runRef": run_id,
         "executionStatus": status_run, "verificationStatus": "VERIFIED",
         "planHash": plan_hash,
-    })
+        "durationMs": round((time.monotonic() - started_at) * 1000, 3),
+    }, run_ref=run_id, agent_ref=def_id, correlation_id=run_id)
     for finding in findings:
         _emit(tenant, "VerificationFinding", {
             "findingId": f"{run_id}:{finding['finding_key']}",
             "category": finding["category"], "severity": finding["severity"],
-            "effectStatus": "NOT_EXECUTED", "ownerRef": actor,
-        })
+            "effectStatus": "NOT_EXECUTED",
+            "ownerRef": opaque_actor_ref(actor),
+            "evidenceRefs": [run_id],
+        }, run_ref=run_id, agent_ref=def_id, correlation_id=run_id)
 
     swept = store.sweep_simulation_runs(tenant, retention_days, db_path=db_path)
     if swept:
@@ -402,12 +408,16 @@ def _audit(tenant: str, actor: str, event_type: str, summary: str,
               details={"tenant": tenant, **details})
 
 
-def _emit(tenant: str, kind: str, data: dict[str, Any]) -> None:
+def _emit(tenant: str, kind: str, data: dict[str, Any], *,
+          run_ref: str | None = None, agent_ref: str | None = None,
+          correlation_id: str | None = None) -> None:
     """Emit through the configured adapter; telemetry must never break a run."""
     try:
         from openexecutive.bo.telemetry.adapter import get_adapter
 
-        get_adapter().emit(tenant=tenant, kind=kind, data=data)
+        get_adapter().emit(tenant=tenant, kind=kind, data=data,
+                           run_ref=run_ref, agent_ref=agent_ref,
+                           correlation_id=correlation_id)
     except Exception:  # noqa: BLE001 — telemetry is fire-and-forget
         import logging
 

@@ -58,7 +58,7 @@ def test_all_invalid_fixtures_rejected() -> None:
     [
         lambda e: e.update({"tenantRef": ""}),
         lambda e: e.update({"eventId": "with space"}),
-        lambda e: e.update({"configVersion": -1}),
+        lambda e: e.update({"configVersion": -1}),  # numeric: contract wants opaque string
         lambda e: e["data"].update({"sequence": -1}),
         lambda e: e["data"].update({"note": "camp extra"}),
         lambda e: e.pop("correlationId"),
@@ -106,7 +106,7 @@ def test_enabled_adapter_stamps_and_sends(tmp_path, monkeypatch) -> None:  # noq
     assert event["tenantRef"] == "tenant-a"
     assert event["installationId"] == "install-test"
     assert event["schemaVersion"] == "bo.telemetry.v1"
-    assert event["configVersion"] == 1
+    assert event["configVersion"] == "1"  # opaque string on the wire
     schema.validate_event(event)  # the emitted envelope is itself valid
     assert transport.events == [event]
     assert adapter.emitted == 1

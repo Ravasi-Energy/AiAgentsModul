@@ -1,21 +1,20 @@
 {
   "schemaVersion": "bo.telemetry.v1",
-  "eventId": "evt_demo_rf_0003",
+  "eventId": "evt_64af7f5af56446779225aec2",
   "producerId": "boagents",
-  "installationId": "install-demo-01",
-  "tenantRef": "tenant-demo",
+  "installationId": "install-fixture",
+  "tenantRef": "tenant-fixture",
   "product": "BOAgents",
   "kind": "RunFinished",
-  "occurredAt": "2026-09-21T10:16:01.250Z",
-  "correlationId": "corr_demo_0002",
-  "agentRef": null,
-  "runRef": "run_0123456789ab",
-  "configVersion": 3,
+  "occurredAt": "2026-09-22T08:09:36.929Z",
+  "correlationId": "run_fixture01",
+  "agentRef": "bot_fixture01",
+  "runRef": "run_fixture01",
+  "configVersion": "1",
   "data": {
-    "runRef": "run_0123456789ab",
     "executionStatus": "SUCCEEDED",
     "verificationStatus": "VERIFIED",
-    "planHash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-    "durationMs": 1250
+    "planHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "durationMs": 1.25
   }
 }

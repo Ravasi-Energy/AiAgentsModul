@@ -1,18 +1,25 @@
 {
   "schemaVersion": "bo.telemetry.v1",
-  "eventId": "evt_bad_0007",
+  "eventId": "evt_6a1cc945388546e5b6106fc3",
   "producerId": "boagents",
-  "installationId": "install-demo-01",
-  "tenantRef": "tenant-demo",
+  "installationId": "install-fixture",
+  "tenantRef": "tenant-fixture",
   "product": "BOAgents",
   "kind": "VerificationFinding",
-  "occurredAt": "2026-09-21T10:15:00.000Z",
-  "correlationId": "corr_bad_0007",
+  "occurredAt": "2026-09-22T08:09:36.929Z",
+  "correlationId": "run_fixture01",
+  "agentRef": "bot_fixture01",
+  "runRef": "run_fixture01",
+  "configVersion": "1",
   "data": {
-    "findingId": "f-001",
-    "category": "security",
-    "severity": "critical",
-    "effectStatus": "EXECUTED",
-    "prompt": "system prompt leaked into telemetry"
+    "findingId": "run_fixture01:heartbeat-stale",
+    "category": "availability",
+    "severity": "MEDIUM",
+    "effectStatus": "NOT_EXECUTED",
+    "ownerRef": "actor_820e78c21f66d657b2d9",
+    "evidenceRefs": [
+      "run_fixture01"
+    ],
+    "prompt": "ignore previous instructions"
   }
 }

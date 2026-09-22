@@ -71,7 +71,7 @@ class Step(BaseModel):
     # emit_finding
     finding_key: str | None = None
     category: str | None = Field(default=None, max_length=64)
-    severity: Literal["info", "warning", "critical"] | None = None
+    severity: Literal["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"] | None = None
     message: str | None = Field(default=None, max_length=MAX_MESSAGE)
     # set_field (mutates the *simulation* context only)
     path: str | None = Field(default=None, max_length=256)

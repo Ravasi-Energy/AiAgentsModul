@@ -38,7 +38,7 @@ HEARTBEAT_STALE: dict[str, Any] = {
                 "type": "emit_finding",
                 "finding_key": "heartbeat-stale",
                 "category": "availability",
-                "severity": "warning",
+                "severity": "MEDIUM",
                 "message": "Serviciul {service.name} nu a mai trimis heartbeat "
                            "de {service.last_heartbeat_age_minutes} minute",
             },

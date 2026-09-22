@@ -1,22 +1,24 @@
 {
   "schemaVersion": "bo.telemetry.v1",
-  "eventId": "evt_demo_vf_0004",
+  "eventId": "evt_6a1cc945388546e5b6106fc3",
   "producerId": "boagents",
-  "installationId": "install-demo-01",
-  "tenantRef": "tenant-demo",
+  "installationId": "install-fixture",
+  "tenantRef": "tenant-fixture",
   "product": "BOAgents",
   "kind": "VerificationFinding",
-  "occurredAt": "2026-09-21T10:16:01.000Z",
-  "correlationId": "corr_demo_0002",
-  "agentRef": null,
-  "runRef": "run_0123456789ab",
-  "configVersion": 3,
+  "occurredAt": "2026-09-22T08:09:36.929Z",
+  "correlationId": "run_fixture01",
+  "agentRef": "bot_fixture01",
+  "runRef": "run_fixture01",
+  "configVersion": "1",
   "data": {
-    "findingId": "run_0123456789ab:heartbeat-stale",
+    "findingId": "run_fixture01:heartbeat-stale",
     "category": "availability",
-    "severity": "warning",
+    "severity": "MEDIUM",
     "effectStatus": "NOT_EXECUTED",
-    "ownerRef": "admin@example.test",
-    "evidenceRefs": ["run_0123456789ab"]
+    "ownerRef": "actor_820e78c21f66d657b2d9",
+    "evidenceRefs": [
+      "run_fixture01"
+    ]
   }
 }

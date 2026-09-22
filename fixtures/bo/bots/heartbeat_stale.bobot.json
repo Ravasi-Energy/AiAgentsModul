@@ -4,11 +4,21 @@
   "kind": "BOT",
   "content": {
     "schema_version": "bo.bobot.v1",
-    "trigger": {"type": "event", "event": "heartbeat.stale"},
+    "trigger": {
+      "type": "event",
+      "event": "heartbeat.stale"
+    },
     "predicates": {
       "all": [
-        {"op": "exists", "path": "service.name"},
-        {"op": "gt", "path": "service.last_heartbeat_age_minutes", "value": 30}
+        {
+          "op": "exists",
+          "path": "service.name"
+        },
+        {
+          "op": "gt",
+          "path": "service.last_heartbeat_age_minutes",
+          "value": 30
+        }
       ]
     },
     "steps": [
@@ -27,7 +37,7 @@
         "type": "emit_finding",
         "finding_key": "heartbeat-stale",
         "category": "availability",
-        "severity": "warning",
+        "severity": "MEDIUM",
         "message": "Serviciul {service.name} nu a mai trimis heartbeat de {service.last_heartbeat_age_minutes} minute"
       },
       {

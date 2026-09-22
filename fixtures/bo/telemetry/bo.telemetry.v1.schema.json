@@ -2,12 +2,12 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "bo.telemetry.v1",
   "title": "BO telemetry envelope v1",
-  "description": "Contract comun CONTRACTE-V1: envelope + data per kind. Validarea runtime din openexecutive.bo.telemetry.schema oglindește acest document; testele de fixture țin cele două în pas.",
+  "description": "Contract comun CONTRACTE-V1 + decizia VAL1-02: configVersion string opac, runRef numai în anvelopă (obligatoriu pentru evenimente de rulare), severity din enum, evidenceRefs listă de referințe opace, actorRef opac. Validarea runtime din openexecutive.bo.telemetry.schema oglindește acest document; testele de fixture țin cele două în pas.",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "schemaVersion", "eventId", "producerId", "installationId", "tenantRef",
-    "product", "kind", "occurredAt", "correlationId", "data"
+    "product", "kind", "occurredAt", "correlationId", "configVersion", "data"
   ],
   "properties": {
     "schemaVersion": {"const": "bo.telemetry.v1"},
@@ -20,11 +20,11 @@
       "enum": ["Heartbeat", "RunStarted", "RunFinished",
                "VerificationFinding", "ConfigApplied"]
     },
-    "occurredAt": {"$ref": "#/$defs/rfc3339"},
+    "occurredAt": {"$ref": "#/$defs/rfc3339utc"},
     "correlationId": {"$ref": "#/$defs/opaqueId"},
     "agentRef": {"anyOf": [{"$ref": "#/$defs/opaqueId"}, {"type": "null"}]},
     "runRef": {"anyOf": [{"$ref": "#/$defs/opaqueId"}, {"type": "null"}]},
-    "configVersion": {"type": "integer", "minimum": 0},
+    "configVersion": {"$ref": "#/$defs/opaqueString"},
     "data": {"type": "object"}
   },
   "$defs": {
@@ -32,9 +32,14 @@
       "type": "string",
       "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
     },
-    "rfc3339": {
+    "opaqueString": {
       "type": "string",
-      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$"
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "rfc3339utc": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|\\+00:00)$"
     },
     "heartbeatData": {
       "type": "object", "additionalProperties": false,
@@ -42,14 +47,13 @@
       "properties": {
         "sequence": {"type": "integer", "minimum": 0},
         "status": {"enum": ["HEALTHY", "DEGRADED", "UNAVAILABLE"]},
-        "observedAt": {"$ref": "#/$defs/rfc3339"}
+        "observedAt": {"$ref": "#/$defs/rfc3339utc"}
       }
     },
     "runStartedData": {
       "type": "object", "additionalProperties": false,
-      "required": ["runRef"],
       "properties": {
-        "runRef": {"$ref": "#/$defs/opaqueId"},
+        "trigger": {"type": "string", "maxLength": 64},
         "definitionRef": {"$ref": "#/$defs/opaqueId"},
         "versionNo": {"type": "integer", "minimum": 1},
         "runKind": {"type": "string", "maxLength": 64}
@@ -57,9 +61,8 @@
     },
     "runFinishedData": {
       "type": "object", "additionalProperties": false,
-      "required": ["runRef", "executionStatus", "verificationStatus"],
+      "required": ["executionStatus", "verificationStatus"],
       "properties": {
-        "runRef": {"$ref": "#/$defs/opaqueId"},
         "executionStatus": {
           "enum": ["SUCCEEDED", "PARTIAL", "FAILED", "CANCELLED", "UNKNOWN"]
         },
@@ -72,31 +75,38 @@
     },
     "verificationFindingData": {
       "type": "object", "additionalProperties": false,
-      "required": ["findingId", "category", "severity", "effectStatus"],
+      "required": ["findingId", "category", "severity", "effectStatus",
+                   "ownerRef"],
       "properties": {
         "findingId": {"$ref": "#/$defs/opaqueId"},
         "category": {"type": "string", "maxLength": 64},
-        "severity": {"type": "string", "maxLength": 32},
+        "severity": {"enum": ["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]},
         "effectStatus": {
           "enum": ["NOT_EXECUTED", "EXECUTED", "PARTIAL", "UNKNOWN"]
         },
-        "ownerRef": {"type": "string", "maxLength": 256},
+        "ownerRef": {"type": "string", "minLength": 1, "maxLength": 256},
         "evidenceRefs": {
-          "type": "array", "maxItems": 50,
-          "items": {"type": "string", "maxLength": 256}
+          "type": "array", "maxItems": 32,
+          "items": {"type": "string", "minLength": 1, "maxLength": 128}
         }
       }
     },
     "configAppliedData": {
       "type": "object", "additionalProperties": false,
-      "required": ["key", "configVersion", "applyMode"],
+      "required": ["key", "configVersion", "applyMode", "appliedVersion"],
       "properties": {
         "key": {"type": "string", "maxLength": 128},
-        "configVersion": {"type": "integer", "minimum": 0},
+        "configVersion": {"$ref": "#/$defs/opaqueString"},
         "applyMode": {
           "enum": ["IMMEDIATE", "NEW_RUN", "RESTART", "MIGRATION"]
         },
-        "actorRef": {"type": "string", "maxLength": 256}
+        "appliedVersion": {
+          "anyOf": [{"type": "integer", "minimum": 0}, {"type": "null"}]
+        },
+        "actorRef": {
+          "type": "string", "maxLength": 256,
+          "not": {"pattern": "@"}
+        }
       }
     }
   },
@@ -107,11 +117,17 @@
     },
     {
       "if": {"properties": {"kind": {"const": "RunStarted"}}},
-      "then": {"properties": {"data": {"$ref": "#/$defs/runStartedData"}}}
+      "then": {
+        "required": ["runRef"],
+        "properties": {"data": {"$ref": "#/$defs/runStartedData"}}
+      }
     },
     {
       "if": {"properties": {"kind": {"const": "RunFinished"}}},
-      "then": {"properties": {"data": {"$ref": "#/$defs/runFinishedData"}}}
+      "then": {
+        "required": ["runRef"],
+        "properties": {"data": {"$ref": "#/$defs/runFinishedData"}}
+      }
     },
     {
       "if": {"properties": {"kind": {"const": "VerificationFinding"}}},
