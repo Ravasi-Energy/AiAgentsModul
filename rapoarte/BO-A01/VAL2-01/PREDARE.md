@@ -76,6 +76,6 @@ Codex).
 
 ## Artefacte
 
-- Bundle: `.bundle-uri/bo-a01-val2-01.bundle` _(SHA256 în coordonare/rapoarte/BO-A01/PROGRES.md)_
+- Bundle: `agenti/BO-A01/bo-a01-val2-01.bundle` _(SHA256 în MANIFEST-VAL2-01.json și coordonare/rapoarte/BO-A01/PROGRES.md)_
 - Probe: `rapoarte/BO-A01/VAL2-01/probe-ui/` (11 capturi + rezultate)
 - Contract comun: `coordonare/contracte/bo.package.v1/` (SHA256SUMS inclus)
