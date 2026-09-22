@@ -1,0 +1,104 @@
+{
+  "_nota": "PROPUNERE VAL2-00 — chei de setări pentru suprafața pachetelor semnate. NU sunt configurație executabilă și NU sunt implementate în runtime. Formatul urmează REGISTRU-SETARI-PROPUS.json: cheie, tip, default, domeniu, rol minim, scope, audit.",
+  "setari": [
+    {
+      "key": "bo.packages.enabled",
+      "type": "boolean",
+      "default": false,
+      "scope": "tenant",
+      "minRole": "admin",
+      "audit": true,
+      "note": "Oprit implicit. Pornirea instalației de pachete este decizie administrativă auditată; în Valul 2 rămâne propunere."
+    },
+    {
+      "key": "bo.packages.trust_store_ref",
+      "type": "string",
+      "default": "",
+      "scope": "tenant",
+      "minRole": "admin",
+      "audit": true,
+      "note": "Referința registrului bo.package.registry.v1 activ (versiune + digest). Registrul se administrează separat de pachete; cheile publice nu vin niciodată din pachet."
+    },
+    {
+      "key": "bo.packages.allowed_kinds",
+      "type": "list<string>",
+      "default": ["bobot"],
+      "domain": ["bobot", "agent", "workflow"],
+      "scope": "tenant",
+      "minRole": "admin",
+      "audit": true,
+      "note": "Cei de la studiu: „pachete: emitenți/chei de încredere, versiuni permise, revocări, canal de actualizare și politica de revenire”."
+    },
+    {
+      "key": "bo.packages.update_channel",
+      "type": "enum",
+      "domain": ["manual", "stable", "candidate"],
+      "default": "manual",
+      "scope": "tenant",
+      "minRole": "admin",
+      "audit": true,
+      "note": "Canalul de actualizare acceptat; `manual` = fiecare versiune se aprobă explicit."
+    },
+    {
+      "key": "bo.packages.rollback_requires_approval",
+      "type": "boolean",
+      "default": true,
+      "scope": "tenant",
+      "minRole": "admin",
+      "audit": true,
+      "note": "Reinstalarea unei versiuni <= cea instalată cere approvalRef din registrul de încredere. NU expunem setare prin care un agent își elimină singur această poartă."
+    },
+    {
+      "key": "bo.packages.max_package_bytes",
+      "type": "integer",
+      "default": 8388608,
+      "bounds": {"min": 65536, "max": 268435456},
+      "scope": "tenant",
+      "minRole": "admin",
+      "audit": true
+    },
+    {
+      "key": "bo.packages.quarantine_on_first_install",
+      "type": "boolean",
+      "default": true,
+      "scope": "tenant",
+      "minRole": "admin",
+      "audit": true,
+      "note": "Pachetele verificate ACCEPT intră în carantină/draft, nu direct în activ — aliniat ciclului de viață din studiu (import → verify → quarantine → approve → activate)."
+    },
+    {
+      "key": "bo.router.enabled",
+      "type": "boolean",
+      "default": false,
+      "scope": "tenant",
+      "minRole": "admin",
+      "audit": true,
+      "note": "Routerul de modele rămâne o interfață propusă; această cheie există doar pentru delimitare și este fără efect în Valul 2."
+    },
+    {
+      "key": "bo.router.min_quality",
+      "type": "number",
+      "default": null,
+      "bounds": {"min": 0.0, "max": 1.0},
+      "scope": "tenant",
+      "minRole": "admin",
+      "audit": true,
+      "note": "Prag de calitate din evaluări proprii. Prag ratat → REFUSE cu escaladare, nu acceptare silențioasă (metBar=false nu e rută)."
+    },
+    {
+      "key": "bo.router.max_cost_per_call",
+      "type": "number",
+      "default": null,
+      "bounds": {"min": 0},
+      "scope": "tenant",
+      "minRole": "admin",
+      "audit": true,
+      "note": "Plafon de cost per decizie; depășit → BUDGET_EXCEEDED."
+    }
+  ],
+  "principii": [
+    "Fiecare cheie: tip, default, domeniu/bounds, rol minim, scope tenant, audit, CAS la scriere (ca bo_settings din Valul 1).",
+    "Cheia privată de semnare NU este setare — este secretRef în afara registrului.",
+    "Nicio setare nu permite unui agent să-și elimine singur controalele obligatorii."
+  ]
+}
