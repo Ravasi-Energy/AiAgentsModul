@@ -1,0 +1,16 @@
+{
+  "schemaVersion": "bo.bobot.v1",
+  "name": "demo-bot",
+  "kind": "BOT",
+  "content": {
+    "steps": [
+      {
+        "id": "s1",
+        "type": "check",
+        "check": {
+          "fact": "system.alive"
+        }
+      }
+    ]
+  }
+}

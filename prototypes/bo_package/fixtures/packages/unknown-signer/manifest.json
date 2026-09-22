@@ -1,0 +1,23 @@
+{
+  "schemaVersion": "bo.package.v1",
+  "packageId": "pkg.demo-bot",
+  "version": "1.3.0",
+  "kind": "bobot",
+  "publisherId": "pub-stranger",
+  "keyId": "key-stranger",
+  "createdAt": "2026-09-23T00:00:00Z",
+  "artifactDigests": {
+    "bots/demo.bobot.json": "sha256:e42c6cfdde40d32d1a9c06d5351888146f0d011dde6032efa3a8fd4a231e7577",
+    "docs/README.md": "sha256:916cb2ce24acc5c2fe92d33ec3bf103fd39efba48f6d1435d1fb40ee3528b66a"
+  },
+  "dependencies": [],
+  "compatibility": {
+    "minHost": null,
+    "maxHost": null
+  },
+  "requestedCapabilities": [],
+  "signature": {
+    "algorithm": "ed25519",
+    "value": "l+I94RiRQltMEdWZIQJNenTvIjZgbF6KqDvEcy5JjEKH/L0aW/rQ2kYCc1xwfez30/U02Uk9hSv04VVC2Rm7DQ=="
+  }
+}
