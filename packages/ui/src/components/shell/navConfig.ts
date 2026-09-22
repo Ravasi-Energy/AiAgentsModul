@@ -208,6 +208,20 @@ export const ADVANCED_ITEMS: NavItem[] = [
     description:
       "Multi-client mode for fractional work — switch the live company between named client slots.",
   },
+  {
+    href: "/settings/bo",
+    label: "BOAgents — Setări",
+    icon: "cog",
+    description:
+      "Setările tenantului BOAgents: nume, limbă, fus orar și parametrii de simulare BoBot.",
+  },
+  {
+    href: "/bo/bots",
+    label: "BoBots",
+    icon: "bolt",
+    description:
+      "Automatizări deterministe BOAgents — ciorne, versiuni și simulări fără efecte externe.",
+  },
 ];
 
 // Anchors the mobile bottom nav. ≤5 per Material guidance; "More" opens

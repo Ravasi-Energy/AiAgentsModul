@@ -2,6 +2,7 @@
 
 @import "tailwindcss";
 @config "../../tailwind.config.ts";
+@import "../styles/bo.css";
 
 /* Design tokens. Values are space-separated RGB triplets so Tailwind's
  * `<alpha-value>` interpolation can apply opacity modifiers like

@@ -33,6 +33,7 @@ const SECTIONS = [
   { id: 'mcp_server', label: 'MCP Server', sub: 'Open Executive exposed as an MCP server — company context as resources and the specialist council as tools, over Streamable-HTTP at /mcp for external agents.' },
   { id: 'user_guide', label: 'User Guide Surface', sub: "The /guide page — plain-language, per-feature overviews served from static prebuilt JSON, sharing this page's loader and renderer but separate from this technical reference." },
   { id: 'clients', label: 'Client Companies (Slots)', sub: 'Multi-client mode for fractional executives: named save files of the full company context, one active at a time, with save-back switching and per-client MCP tool configs.' },
+  { id: 'bo_agents', label: 'BOAgents Slice', sub: 'Tenant-scoped settings, deterministic BoBots with dry-run simulation, and the disabled-by-default bo.telemetry.v1 adapter.' },
 ];
 
 interface SectionMeta {

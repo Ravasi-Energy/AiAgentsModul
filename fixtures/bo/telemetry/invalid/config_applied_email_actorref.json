@@ -1,0 +1,21 @@
+{
+  "schemaVersion": "bo.telemetry.v1",
+  "eventId": "evt_11cc718159984ecc8d289813",
+  "producerId": "boagents",
+  "installationId": "install-fixture",
+  "tenantRef": "tenant-fixture",
+  "product": "BOAgents",
+  "kind": "ConfigApplied",
+  "occurredAt": "2026-09-22T08:09:36.929Z",
+  "correlationId": "corr_1137515bb3cd4d4da51c67e1",
+  "agentRef": null,
+  "runRef": null,
+  "configVersion": "1",
+  "data": {
+    "key": "bo.ui.language",
+    "configVersion": "1",
+    "applyMode": "IMMEDIATE",
+    "appliedVersion": 1,
+    "actorRef": "admin@example.com"
+  }
+}
