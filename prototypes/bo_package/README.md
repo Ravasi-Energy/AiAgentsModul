@@ -1,13 +1,22 @@
 # Prototip VAL2-00 — pachete semnate `bo.package.v1`
 
-**Statut: prototip izolat, propunere neratificată. NU este funcționalitate de
+**Statut: prototip izolat, ISTORIC (VAL2-00). NU este funcționalitate de
 produs, NU este activat în runtime și NU are efecte externe.**
+
+> **Sursa canonică VAL2-01 este artefactul înghețat din
+> `coordonare/contracte/bo.package.v1/`** (în afara acestui repo —
+> fingerprint `02571944…92d99`, schemă `f070e838…95e13`). Fișierele de aici
+> sunt istoricul propunerii VAL2-00: schema din acest director
+> (`4c826aeb…f4c`) diferă de cea înghețată și **nu** este citită de
+> runtime (`openexecutive/bo/packages/contract.py` validează prin cod).
+> Implementarea de produs remediată este în `openexecutive/bo/packages/`.
 
 ## Conținut
 
 - `CONTRACT-bo.package.v1.md` — contractul propus (manifest, canonicalizare,
   registru de încredere, ordinea verificării).
-- `bo.package.v1.schema.json` — schema canonică JSON Schema 2020-12.
+- `bo.package.v1.schema.json` — schema **istorică** JSON Schema 2020-12
+  (VAL2-00; cea canonică e în artefactul înghețat).
 - `bo_pkg/` — implementarea de referință: `contract.py` (validare + semver),
   `canon.py` (canonicalizare subset-JCS), `signing.py` (Ed25519),
   `registry.py` (trust store `bo.package.registry.v1`), `build.py`
