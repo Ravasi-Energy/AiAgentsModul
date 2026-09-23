@@ -5,9 +5,9 @@
 - **Repo:** Ravasi-Energy/BOAgents
 - **Ramură:** `bo/val3-01-a01-router` — **PR draft:** https://github.com/Ravasi-Energy/BOAgents/pull/6
 - **baseSHA:** `e3abaf74a1e9998a506287e3519c7213ee9e0661` (main integrat, merge PR #5)
-- **headSHA:** `31f84aa6ce3fab5e061bdf2fa4fb8f96878a7311` (1 commit peste bază)
+- **headSHA:** vezi `coordonare/rapoarte/BO-A01/VAL3-01/PREDARE.md` (referința canonică — copia din repo nu poate conține propriul SHA)
 - **Bundle:** `agenti/BO-A01/bo-a01-val3-01.bundle` — `git bundle verify` OK, istoric complet; **SHA256 `acf70488a06818f104e82270306e0246664c11a7dfe9b3d4bb406f4f11b65a50`**
-- **CI:** rulată local pe head (nu există gate CI extern confirmat); rezultatele de mai jos sunt pe `31f84aa`.
+- **CI:** rulată local pe head (nu există gate CI extern confirmat); rezultatele de mai jos sunt pe head-ul curent (vezi referința canonică).
 
 ## Matrice cerință → cod → probă → rezultat
 
@@ -40,7 +40,7 @@
 
 ## Demonstrație locală cap-coadă (revizii reale)
 
-Pe `31f84aa`, backend real + receptor-stub Guardian compatibil A02:
+Pe head-ul curent (vezi referința canonică), backend real + receptor-stub Guardian compatibil A02:
 
 1. `bo.router.observe_enabled` false → true prin API Setări (CAS) → status `observe_enabled:true`.
 2. Intrarе catalog creată prin API (`anthropic/claude-sonnet-5`, scor 0.87, EU).

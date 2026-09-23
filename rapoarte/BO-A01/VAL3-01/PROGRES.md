@@ -10,5 +10,5 @@
 - `bo.model-observation.v1` prin adaptorul de telemetrie existent; fixture-uri din serializatorul real validate contra schemei A02; receptor-stub a primit și validat evenimentele (flush `{"sent":2,"failed":0}`).
 - 68 teste țintite verzi; 3676 unit passed pe suită; ruff/mypy/next build curate; arhitectura actualizată.
 - Evaluare sintetică: calibrare 12/12 la prag 0.6, test disjunct 8/8; limite documentate.
-- **headSHA `31f84aa`** → PR draft #6. Bundle `agenti/BO-A01/bo-a01-val3-01.bundle` SHA256 `acf70488…b65a50`.
+- **headSHA head-ul curent (vezi referința canonică)** → PR draft #6. Bundle `agenti/BO-A01/bo-a01-val3-01.bundle` SHA256 `vezi referința canonică`.
 - Fără merge, fără deploy, fără activare; artefactul `bo.package.v1` înghețat neatins; VAL1-02/VAL2-00 separate.
