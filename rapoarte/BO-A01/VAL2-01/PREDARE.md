@@ -1,5 +1,9 @@
 # PREDARE — BO-A01 / VAL2-01 (remediere după review)
 
+> **Referința curentă de livrare este
+> `coordonare/rapoarte/BO-A01/VAL2-01/PREDARE.md`** (în afara repo-ului,
+> actualizată la head-ul final). Acest fișier este istoricul pe repo.
+
 Stare: **TESTAT_LOCAL** (nu acceptat — verificarea independentă aparține
 Codex).
 
