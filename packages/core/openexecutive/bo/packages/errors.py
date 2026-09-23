@@ -31,8 +31,10 @@ class PackageReject(Exception):
         "ROLLBACK_UNAUTHORIZED",
         "VERSION_CONFLICT",
         "APPROVAL_INVALID",
+        "KIND_NOT_ALLOWED",
         # store
         "INVALID_REGISTRY",
+        "REGISTRY_UNAVAILABLE",
         "PACKAGES_DISABLED",
     }
 

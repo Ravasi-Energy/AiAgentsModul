@@ -100,9 +100,11 @@ def _no_const(name: str) -> None:
     raise PackageReject("INVALID_MANIFEST", f"forbidden JSON constant: {name}")
 
 
-def load_manifest(path: Path) -> dict[str, Any]:
+def load_manifest_raw(path: Path) -> tuple[dict[str, Any], bytes]:
     """Read + parse manifest.json with the size cap applied *before* parse and
-    duplicate keys rejected. Returns the parsed object (not yet validated)."""
+    duplicate keys rejected. Returns (parsed object, raw bytes) — the raw
+    bytes are kept for callers that need the on-disk form; `manifestDigest`
+    binds the canonical signed payload (BO-C14N-v1 minus `signature`)."""
     try:
         size = path.stat().st_size
     except OSError:
@@ -124,7 +126,12 @@ def load_manifest(path: Path) -> dict[str, Any]:
         raise PackageReject("INVALID_MANIFEST", "invalid JSON") from None
     if not isinstance(doc, dict):
         raise PackageReject("INVALID_MANIFEST", "manifest is not an object")
-    return doc
+    return doc, raw
+
+
+def load_manifest(path: Path) -> dict[str, Any]:
+    """Parsed manifest object (not yet validated). See `load_manifest_raw`."""
+    return load_manifest_raw(path)[0]
 
 
 def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:

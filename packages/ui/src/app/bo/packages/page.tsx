@@ -356,7 +356,7 @@ export default function BoPackagesPage() {
                     }}
                   >
                     <dt>manifestDigest</dt>
-                    <dd className="bo-mono">{p.verdict.manifestDigest}</dd>
+                    <dd className="bo-mono">{p.verdict.manifestDigest || "—"}</dd>
                     <dt>verificat la</dt>
                     <dd>
                       {p.verdict.checkedAt
@@ -364,7 +364,7 @@ export default function BoPackagesPage() {
                         : "—"}
                     </dd>
                     <dt>politica</dt>
-                    <dd className="bo-mono">{p.verdict.policyVersion ?? "—"}</dd>
+                    <dd className="bo-mono">{p.verdict.policyVersion || "—"}</dd>
                     <dt>sursă</dt>
                     <dd className="bo-mono">{p.source_path}</dd>
                     {p.approval_id ? (

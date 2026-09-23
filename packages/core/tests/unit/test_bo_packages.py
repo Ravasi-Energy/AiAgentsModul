@@ -20,7 +20,13 @@ from openexecutive.bo.identity import Identity
 from openexecutive.bo.packages import service, store
 from openexecutive.bo.packages.canon import canonical_bytes, signed_payload
 from openexecutive.bo.packages.errors import PackageReject
-from openexecutive.bo.packages.verify import artifact_set_digest
+from openexecutive.bo.packages.registry import TrustRegistry
+from openexecutive.bo.packages.verify import (
+    Approval,
+    artifact_set_digest,
+    parse_approvals,
+    verify_package,
+)
 from openexecutive.bo.settings import store as settings_store
 
 from .bo_testkit import capture_audit, use_tmp_db
@@ -145,7 +151,11 @@ class TestImportAccept:
         assert res["verdict"]["verdict"] == "ACCEPT"
         assert res["verdict"]["tenantRef"] == "tenant-a"
         assert res["verdict"]["policyVersion"] == "pol-1"
+        # trustVersion = eticheta declarată `version` a registrului
         assert res["verdict"]["trustVersion"] == "trust-1"
+        assert res["verdict"]["schemaVersion"] == "bo.package.verdict.v1"
+        assert res["verdict"]["manifestDigest"].startswith("sha256:")
+        assert res["verdict"]["artifactSetDigest"].startswith("sha256:")
         assert res["idempotent"] is False
         stored = Path(res["stored_path"])
         assert (stored / "bots/a.bobot.json").is_file()
@@ -376,6 +386,7 @@ class TestDowngradeApprovals:
             expires_at=(datetime.now(UTC) + timedelta(hours=1)).isoformat(),
             db_path=db_path)
         res = _import(ADMIN, tmp_path / "v1", db_path)
+        # candidat există, dar legătura de digest nu se potrivește
         assert res["verdict"]["reasons"][0].startswith("ROLLBACK_UNAUTHORIZED")
 
     def test_expired_approval_rejected(
@@ -392,6 +403,7 @@ class TestDowngradeApprovals:
              "artifact_set_digest": asd, "expires_at": past,
              "created_by": "admin@test"}, db_path=db_path)
         res = _import(ADMIN, tmp_path / "v1", db_path)
+        # candidat există, dar e expirat
         assert res["verdict"]["reasons"][0].startswith("ROLLBACK_UNAUTHORIZED")
 
     def test_other_tenant_approval_does_not_apply(
@@ -409,6 +421,172 @@ class TestDowngradeApprovals:
             db_path=db_path)
         res = _import(ADMIN, tmp_path / "v1", db_path)
         assert res["verdict"]["reasons"][0].startswith("ROLLBACK_UNAUTHORIZED")
+
+
+class TestVerifierContractService:
+    """Contract `bo.package.verdict.v1` și semantica §8 — prin `verify_package`
+    și prin lanțul de serviciu (import → DB), complementar clasei
+    TestVerifierContract."""
+
+    def _registry(self, **policy_over: Any) -> TrustRegistry:
+        doc = _registry_doc()
+        doc["policy"].update(policy_over)
+        return TrustRegistry.from_dict(doc)
+
+    def test_verdict_document_shape(self, tmp_path: Path) -> None:
+        src = tmp_path / "pkg"
+        write_pkg(src)
+        v = verify_package(src, self._registry(), tenant_ref="tenant-a")
+        d = v.to_dict()
+        assert d["schemaVersion"] == "bo.package.verdict.v1"
+        assert d["verdict"] == "ACCEPT" and d["reasons"] == []
+        for f in ("packageId", "version", "manifestDigest", "artifactSetDigest",
+                  "tenantRef", "publisherId", "keyId", "policyVersion",
+                  "trustVersion", "checkedAt", "expiresAt"):
+            assert isinstance(d[f], str) and d[f], f
+        assert d["idempotent"] is False and "signature" not in d
+
+    def test_manifest_digest_binds_canonical_payload(
+            self, tmp_path: Path) -> None:
+        """manifestDigest = sha256 peste payloadul canonic semnat — aceiași
+        octeți pe care îi leagă semnătura, stabili la reformatare."""
+        src = tmp_path / "pkg"
+        write_pkg(src)
+        v = verify_package(src, self._registry(), tenant_ref="t")
+        doc = json.loads((src / "manifest.json").read_bytes())
+        assert v.manifest_digest == \
+            f"sha256:{hashlib.sha256(signed_payload(doc)).hexdigest()}"
+
+    def test_artifact_set_digest_is_sorted_pairs(self, tmp_path: Path) -> None:
+        """artifactSetDigest = sha256 peste JSON-ul compact al listei sortate
+        de perechi [cale, digest] — formula §2 a contractului."""
+        src = tmp_path / "pkg"
+        m = write_pkg(src)
+        pairs = [[p, m["artifactDigests"][p]]
+                 for p in sorted(m["artifactDigests"])]
+        want = "sha256:" + hashlib.sha256(json.dumps(
+            pairs, separators=(",", ":"), ensure_ascii=False
+        ).encode()).hexdigest()
+        assert artifact_set_digest(m["artifactDigests"]) == want
+
+    def test_same_version_same_asd_is_idempotent_accept(
+            self, tmp_path: Path) -> None:
+        src = tmp_path / "pkg"
+        m = write_pkg(src)
+        asd = artifact_set_digest(m["artifactDigests"])
+        v = verify_package(
+            src, self._registry(), tenant_ref="t",
+            installed={"pkg.demo": {"version": "1.0.0",
+                                    "artifactSetDigest": asd}})
+        assert v.accepted and v.idempotent
+        d = v.to_dict()
+        assert d["reasons"] == [] and d["idempotent"] is True
+
+    def test_same_version_unknown_digest_conflicts(
+            self, tmp_path: Path) -> None:
+        """Digestul instalat necunoscut nu poate dovedi idempotența →
+        conflict conservator (contract §8)."""
+        src = tmp_path / "pkg"
+        write_pkg(src)
+        v = verify_package(
+            src, self._registry(), tenant_ref="t",
+            installed={"pkg.demo": {"version": "1.0.0",
+                                    "artifactSetDigest": None}})
+        assert not v.accepted and v.code == "VERSION_CONFLICT"
+
+    def test_malformed_installed_fails_closed(self, tmp_path: Path) -> None:
+        src = tmp_path / "pkg"
+        write_pkg(src)
+        with pytest.raises(PackageReject) as e:
+            verify_package(src, self._registry(), tenant_ref="t",
+                           installed={"pkg.demo": 42})
+        assert e.value.code == "REGISTRY_UNAVAILABLE"
+
+    def test_kind_not_allowed_by_publisher(self, tmp_path: Path) -> None:
+        """kind permis de politică dar NU de publisher → KIND_NOT_ALLOWED."""
+        src = tmp_path / "pkg"
+        write_pkg(src, kind="workflow")
+        v = verify_package(src, self._registry(), tenant_ref="t")
+        assert not v.accepted and v.code == "KIND_NOT_ALLOWED"
+
+    def test_kind_not_allowed_by_policy(self, tmp_path: Path) -> None:
+        src = tmp_path / "pkg"
+        write_pkg(src, kind="agent")
+        v = verify_package(src, self._registry(allowedKinds=["bobot"]),
+                           tenant_ref="t")
+        assert not v.accepted and v.code == "KIND_NOT_ALLOWED"
+
+    def test_symlink_component_is_traversal(
+            self, db_path: Path, tmp_path: Path) -> None:
+        """Un director-symlink în calea unui artefact declarat → TRAVERSAL
+        (chiar dacă rezolvarea rămâne în interiorul pachetului)."""
+        _enable(db_path)
+        src = tmp_path / "pkg"
+        manifest = write_pkg(src)
+        (src / "alias").symlink_to("docs", target_is_directory=True)
+        manifest["artifactDigests"]["alias/r.md"] = \
+            manifest["artifactDigests"]["docs/r.md"]
+        manifest["signature"]["value"] = base64.b64encode(
+            SK.sign(signed_payload(manifest))).decode()
+        (src / "manifest.json").write_bytes(json.dumps(manifest).encode())
+        res = _import(ADMIN, src, db_path)
+        assert res["verdict"]["reasons"][0].startswith("TRAVERSAL")
+
+    def test_undeclared_symlink_is_traversal(
+            self, db_path: Path, tmp_path: Path) -> None:
+        """Un symlink nedeclarat pe disc → TRAVERSAL din inventar."""
+        _enable(db_path)
+        src = tmp_path / "pkg"
+        write_pkg(src)
+        (src / "evil.txt").symlink_to("/etc/hostname")
+        res = _import(ADMIN, src, db_path)
+        assert res["verdict"]["reasons"][0].startswith("TRAVERSAL")
+
+    def test_symlinked_root_is_traversal(self, tmp_path: Path) -> None:
+        src = tmp_path / "real"
+        write_pkg(src)
+        link = tmp_path / "link"
+        link.symlink_to("real", target_is_directory=True)
+        v = verify_package(link, self._registry(), tenant_ref="t")
+        assert not v.accepted and v.code == "TRAVERSAL"
+
+    def test_context_approval_authorizes_downgrade(
+            self, tmp_path: Path) -> None:
+        """Aprobările vin din context (înregistrări per-tenant), nu din trust
+        store; aceleași legături obligatorii ca în DB; consum unic."""
+        src = tmp_path / "v1"
+        m1 = write_pkg(src, version="1.0.0")
+        asd = artifact_set_digest(m1["artifactDigests"])
+        registry = self._registry()
+        installed = {"pkg.demo": {"version": "2.0.0",
+                                  "artifactSetDigest": "sha256:" + "0" * 64}}
+        ap = Approval(
+            approval_id="rb-1", tenant_ref="tenant-a", package_id="pkg.demo",
+            from_version="2.0.0", to_version="1.0.0", artifact_set_digest=asd,
+            expires_at=datetime(2027, 1, 1, tzinfo=UTC))
+        v = verify_package(src, registry, tenant_ref="tenant-a",
+                           installed=installed, approvals=[ap])
+        assert v.accepted and v.approval_id == "rb-1"
+        assert v.to_dict()["approvalRef"] == "rb-1"
+        # consumată → nu mai autorizează
+        v2 = verify_package(src, registry, tenant_ref="tenant-a",
+                            installed=installed, approvals=[ap],
+                            consumed_approvals={"rb-1"})
+        assert not v2.accepted and v2.code == "ROLLBACK_UNAUTHORIZED"
+        # tenant străin → legătura nu se satisface
+        v3 = verify_package(src, registry, tenant_ref="tenant-b",
+                            installed=installed, approvals=[ap])
+        assert not v3.accepted and v3.code == "ROLLBACK_UNAUTHORIZED"
+
+    def test_registry_rejects_approved_rollbacks_field(
+            self, tmp_path: Path) -> None:
+        """Contract §3: aprobările NU sunt în trust store — un registru cu
+        `approvedRollbacks` e respins la încărcare (fail-closed)."""
+        doc = _registry_doc()
+        doc["policy"]["approvedRollbacks"] = []
+        with pytest.raises(PackageReject) as e:
+            TrustRegistry.from_dict(doc)
+        assert e.value.code == "INVALID_REGISTRY"
 
 
 class TestLifecycle:
@@ -465,6 +643,181 @@ class TestCanon:
     def test_float_rejected(self) -> None:
         with pytest.raises(PackageReject):
             canonical_bytes({"x": 1.5})
+
+
+class TestVerifierContract:
+    """Forma comună `bo.package.verdict.v1` + semantica §8 / symlink / kind —
+    la nivel de verifier, nu de serviciu (paritate cu verificatorul A02)."""
+
+    def _registry(self, **over: Any) -> TrustRegistry:
+        return TrustRegistry.from_dict(_registry_doc(**over))
+
+    def test_verdict_document_shape(self, tmp_path: Path) -> None:
+        src = tmp_path / "pkg"
+        write_pkg(src)
+        v = verify_package(src, self._registry(), tenant_ref="tenant-a",
+                           now=datetime(2026, 9, 23, tzinfo=UTC))
+        d = v.to_dict()
+        assert d["schemaVersion"] == "bo.package.verdict.v1"
+        assert d["verdict"] == "ACCEPT" and d["reasons"] == []
+        for f in ("packageId", "version", "manifestDigest",
+                  "artifactSetDigest", "tenantRef", "publisherId", "keyId",
+                  "policyVersion", "trustVersion", "checkedAt", "expiresAt"):
+            assert isinstance(d[f], str) and d[f]
+        assert d["idempotent"] is False and "signature" not in d
+
+    def test_reject_reasons_first_is_code(self, tmp_path: Path) -> None:
+        src = tmp_path / "pkg"
+        write_pkg(src)
+        (src / "extra.txt").write_bytes(b"x")
+        d = verify_package(src, self._registry(), tenant_ref="t",
+                           now=datetime(2026, 9, 23, tzinfo=UTC)).to_dict()
+        assert d["verdict"] == "REJECT"
+        # forma comună: o singură intrare "CODE: detaliu"
+        assert d["reasons"][0].split(":")[0] == "UNSIGNED_ARTIFACT"
+
+    def test_manifest_digest_is_canonical_payload(
+            self, tmp_path: Path) -> None:
+        src = tmp_path / "pkg"
+        write_pkg(src)
+        doc = json.loads((src / "manifest.json").read_bytes())
+        d = verify_package(src, self._registry(), tenant_ref="t",
+                           now=datetime(2026, 9, 23, tzinfo=UTC)).to_dict()
+        assert d["manifestDigest"] == \
+            f"sha256:{hashlib.sha256(signed_payload(doc)).hexdigest()}"
+
+    def test_artifact_set_digest_is_sorted_pairs(self) -> None:
+        digs = {"b/x": "sha256:" + "1" * 64, "a/y": "sha256:" + "2" * 64}
+        pairs = [[p, digs[p]] for p in sorted(digs)]
+        assert artifact_set_digest(digs) == (
+            "sha256:" + hashlib.sha256(json.dumps(
+                pairs, separators=(",", ":"),
+                ensure_ascii=False).encode()).hexdigest())
+
+    def test_same_version_same_asd_is_idempotent(self, tmp_path: Path) -> None:
+        src = tmp_path / "pkg"
+        m = write_pkg(src)
+        asd = artifact_set_digest(m["artifactDigests"])
+        v = verify_package(
+            src, self._registry(), tenant_ref="t",
+            installed={"pkg.demo": {"version": "1.0.0",
+                                    "artifactSetDigest": asd}},
+            now=datetime(2026, 9, 23, tzinfo=UTC))
+        assert v.accepted and v.idempotent
+        d = v.to_dict()
+        assert d["reasons"] == [] and d["idempotent"] is True
+
+    def test_same_version_unknown_asd_conflicts(self, tmp_path: Path) -> None:
+        src = tmp_path / "pkg"
+        write_pkg(src)
+        d = verify_package(
+            src, self._registry(), tenant_ref="t",
+            installed={"pkg.demo": "1.0.0"},  # digest necunoscut → conservator
+            now=datetime(2026, 9, 23, tzinfo=UTC)).to_dict()
+        assert d["reasons"][0].split(":")[0] == "VERSION_CONFLICT"
+
+    def test_kind_not_allowed_by_publisher(self, tmp_path: Path) -> None:
+        src = tmp_path / "pkg"
+        write_pkg(src, kind="workflow")  # pub-a permite doar bobot+agent
+        d = verify_package(src, self._registry(), tenant_ref="t",
+                           now=datetime(2026, 9, 23, tzinfo=UTC)).to_dict()
+        assert d["reasons"][0].split(":")[0] == "KIND_NOT_ALLOWED"
+
+    def test_symlink_component_is_traversal(self, tmp_path: Path) -> None:
+        src = tmp_path / "pkg"
+        real = tmp_path / "outside"
+        real.mkdir()
+        (real / "a.bobot.json").write_bytes(b'{"x":1}\n')
+        write_pkg(src)  # declară bots/a.bobot.json + docs/r.md
+        import shutil
+        shutil.rmtree(src / "bots")
+        (src / "bots").symlink_to(real)  # director-intermediar symlink
+        d = verify_package(src, self._registry(), tenant_ref="t",
+                           now=datetime(2026, 9, 23, tzinfo=UTC)).to_dict()
+        assert d["reasons"][0].split(":")[0] == "TRAVERSAL"
+
+    def test_symlink_root_is_traversal(self, tmp_path: Path) -> None:
+        src = tmp_path / "pkg"
+        write_pkg(src)
+        link = tmp_path / "link"
+        link.symlink_to(src)
+        d = verify_package(link, self._registry(), tenant_ref="t",
+                           now=datetime(2026, 9, 23, tzinfo=UTC)).to_dict()
+        assert d["reasons"][0].split(":")[0] == "TRAVERSAL"
+
+    def test_context_approval_candidate_accepted(
+            self, tmp_path: Path) -> None:
+        """Aprobare administrată din context (forma canonică snake_case cu
+        toate legăturile) — autorizează downgrade-ul legat."""
+        src_v2, src_v1 = tmp_path / "v2", tmp_path / "v1"
+        write_pkg(src_v2, version="2.0.0")
+        m1 = write_pkg(src_v1, version="1.0.0")
+        asd = artifact_set_digest(m1["artifactDigests"])
+        approvals = parse_approvals([{
+            "approval_id": "apr-reg-1", "tenant_ref": "tenant-a",
+            "package_id": "pkg.demo", "from_version": "2.0.0",
+            "to_version": "1.0.0", "artifact_set_digest": asd,
+            "expires_at": "2026-09-24T00:00:00Z"}])
+        v = verify_package(
+            src_v1, self._registry(), tenant_ref="tenant-a",
+            installed={"pkg.demo": {"version": "2.0.0",
+                                    "artifactSetDigest": artifact_set_digest(
+                                        json.loads((src_v2 / "manifest.json")
+                                                   .read_text())
+                                        ["artifactDigests"])}},
+            approvals=approvals,
+            now=datetime(2026, 9, 23, tzinfo=UTC))
+        assert v.accepted
+        assert v.to_dict()["approvalRef"] == "apr-reg-1"
+
+    def test_consumed_approval_is_unauthorized(self, tmp_path: Path) -> None:
+        src_v1 = tmp_path / "v1"
+        m1 = write_pkg(src_v1, version="1.0.0")
+        approvals = parse_approvals([{
+            "approval_id": "apr-reg-1", "tenant_ref": "tenant-a",
+            "package_id": "pkg.demo", "from_version": "2.0.0",
+            "to_version": "1.0.0",
+            "artifact_set_digest": artifact_set_digest(
+                m1["artifactDigests"]),
+            "expires_at": "2026-09-24T00:00:00Z"}])
+        d = verify_package(
+            src_v1, self._registry(), tenant_ref="tenant-a",
+            installed={"pkg.demo": {"version": "2.0.0",
+                                    "artifactSetDigest": "sha256:" + "0" * 64}},
+            approvals=approvals, consumed_approvals={"apr-reg-1"},
+            now=datetime(2026, 9, 23, tzinfo=UTC)).to_dict()
+        assert d["reasons"][0].split(":")[0] == "ROLLBACK_UNAUTHORIZED"
+
+    def test_approval_bindings_are_mandatory(
+            self, tmp_path: Path) -> None:
+        """Toate legăturile sunt obligatorii — o aprobare fără tenant/digest
+        nu se poate construi (parse fail-closed), iar una legată de alt
+        digest nu autorizează."""
+        src_v1 = tmp_path / "v1"
+        m1 = write_pkg(src_v1, version="1.0.0")
+        # context fără tenant_ref → respins la parse, nu ignorat
+        with pytest.raises(PackageReject) as e:
+            parse_approvals([{
+                "approval_id": "apr-min", "package_id": "pkg.demo",
+                "from_version": "2.0.0", "to_version": "1.0.0",
+                "artifact_set_digest": artifact_set_digest(
+                    m1["artifactDigests"]),
+                "expires_at": "2026-09-24T00:00:00Z"}])
+        assert e.value.code == "REGISTRY_UNAVAILABLE"
+        # legat de un alt digest → nu se potrivește
+        approvals = parse_approvals([{
+            "approval_id": "apr-d", "tenant_ref": "t",
+            "package_id": "pkg.demo", "from_version": "2.0.0",
+            "to_version": "1.0.0",
+            "artifact_set_digest": "sha256:" + "9" * 64,
+            "expires_at": "2026-09-24T00:00:00Z"}])
+        d = verify_package(
+            src_v1, self._registry(), tenant_ref="t",
+            installed={"pkg.demo": {"version": "2.0.0",
+                                    "artifactSetDigest": "sha256:" + "0" * 64}},
+            approvals=approvals,
+            now=datetime(2026, 9, 23, tzinfo=UTC)).to_dict()
+        assert d["reasons"][0].split(":")[0] == "ROLLBACK_UNAUTHORIZED"
 
 
 class TestAccess:

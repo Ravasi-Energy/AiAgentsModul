@@ -1,4 +1,4 @@
-# PREDARE — BO-A01 / VAL2-01
+# PREDARE — BO-A01 / VAL2-01 (remediere după review)
 
 Stare: **TESTAT_LOCAL** (nu acceptat — verificarea independentă aparține
 Codex).
@@ -6,76 +6,104 @@ Codex).
 | | |
 |---|---|
 | Repository | `Ravasi-Energy/BOAgents` |
-| Branch | `bo/val2-01-a01-packages` |
+| Branch | `bo/val2-01-a01-packages` (continuat — același PR) |
 | baseSHA | `46424b5c865bde7e74d3c9f56ea148fc0ae8a4c0` |
-| headSHA | `214b1f8` (implementare) + raportul — vârf la predare: `git rev-parse bo/val2-01-a01-packages` |
+| headSHA | vârf la predare: `git rev-parse bo/val2-01-a01-packages` |
 | PR | https://github.com/Ravasi-Energy/BOAgents/pull/5 (draft, bază `main`) |
-| Artefact comun | `coordonare/contracte/bo.package.v1/` (cu SHA256SUMS) |
+| Artefact comun | `coordonare/contracte/bo.package.v1/` + `MANIFEST.json` (amprentă) |
 
-## Cerințe acoperite
+## Remediere după review (INT-201)
 
-- Integrare `bo.package.v1` în runtime: modul `openexecutive/bo/packages/`
-  (contract/canon/signing/registry/verify/store/service) — import →
-  verificare → carantină → draft, **fără activare**.
-- Toate remediile din decizia de contract: limite înainte/în timpul citirii,
-  chei duplicate `DUPLICATE_KEY`, `NaN`→`INVALID_MANIFEST`, `manifest.json`
-  imbricat = artefact ordinar, reimport idempotent pe `manifest_digest`,
-  conflict pe manifest diferit, downgrade cu aprobare legată
-  tenant/digest/from/to, expirare, consum unic.
-- Trust store `bo.package.registry.v1` separat — cheia nu vine din manifest;
-  `version`/`policyVersion`; validare structurală la salvarea setării.
-- Setări noi (4): `enabled` (off), `max_package_bytes`, `trust_store_json`,
-  `rollback_requires_approval` — CAS + audit + tenant scoping.
-- API: 6 endpoint-uri noi + mapping erori; `packages:write` = admin.
-- UI: `/bo/packages` (RO, `.bo-scope`), editor boolean pentru setări,
-  navigație.
-- Artefact comun predat în `coordonare/contracte/bo.package.v1/` pentru
-  A02/A03: contract, schemă, BO-C14N-v1, 24 fixture-uri + expected +
-  context, 21 vectori canonici, SHA256SUMS, regen.py.
+Convergență completă cu verificatorul independent A02 pe contractul comun:
+
+- **`artifactSetDigest` pe formula §2** — sha256 peste JSON-ul compact al
+  listei sortate de perechi `[cale, digest]` (implementarea A01 folosea
+  canonicalizarea obiectului — divergență față de propriul contract și față
+  de A02/Hire; corectată).
+- **`manifestDigest` explicit** — sha256 peste payloadul canonic semnat
+  (BO-C14N-v1 fără `signature`); identic cu octeții legați de semnătură,
+  stabil la reformatare. Ambiguitatea brut-vs-canonic din review este
+  rezolvată în contract §5.
+- **Verdict `bo.package.verdict.v1`** — `schemaVersion` obligatoriu,
+  `reasons = ["<CODE>: <detaliu>"]`, `idempotent` mereu prezent,
+  `approvalRef` numai la ACCEPT autorizat, fără `signature` decorativă.
+  Schema dedicată: `bo.package.verdict.v1.schema.json`.
+- **`trustVersion`/`policyVersion`** = etichetele declarate din registru
+  (`version`, `policy.policyVersion` — ambele obligatorii).
+- **Downgrade uniform `ROLLBACK_UNAUTHORIZED`** pentru orice legătură
+  nesatisfăcută; aprobările din context cer TOATE legăturile
+  (tenant/package/from/to/digest/expirare) — intrări malformate →
+  `REGISTRY_UNAVAILABLE` fail-closed, nu ignorate.
+- `policy.approvedRollbacks` eliminat — aprobările nu sunt în trust store
+  (contract §3); vin exclusiv din contextul per-tenant (DB în BOAgents).
+- Fixture-uri extinse la **29** (+ `idempotent-reimport`,
+  `kind-not-allowed`, `approval-expired`, `approval-foreign-tenant`,
+  `approval-consumed`); `expected.json` poartă `verdict_doc` complet de
+  referință.
+
+## Probă de interoperabilitate (dovada cerută)
+
+`interop/check_verifier.py` rulează AMBELE implementări peste toate
+fixture-urile cu contextul din `expected.json`:
+
+```
+29 cazuri × 2 implementări — 0 divergențe
+```
+
+Comparate: clasificarea, `manifestDigest`, `artifactSetDigest`,
+`idempotent`, `trustVersion`, `policyVersion`, `tenantRef`, `approvalRef`.
+
+## Cerințe acoperite (primul lot)
+
+- Import → verificare → carantină → draft în `openexecutive/bo/packages/`,
+  **fără activare**, fără efecte externe.
+- Limite înainte/în timpul citirii, chei duplicate, NaN/Infinity,
+  `manifest.json` imbricat = artefact ordinar, symlink oriunde → TRAVERSAL.
+- Idempotent pe `manifest_digest`+`artifactSetDigest`; conflict la manifest
+  sau digest diferit; downgrade legat+expirant+consum unic.
+- Trust store separat; 4 setări tenant (enabled off implicit); API 6
+  endpoint-uri; UI `/bo/packages` românesc.
 
 ## Teste și rezultate reale
 
 | Verificare | Rezultat |
 |---|---|
-| `pytest tests/unit` complet | **3615 passed, 1 skipped** |
-| `test_bo_packages.py` | 41 passed |
+| `pytest tests/unit` complet | **3639 passed, 1 skipped** |
+| `test_bo_packages.py` | **66 passed** (contract + serviciu + rute) |
 | ruff (fișiere atinse) | curat |
-| mypy (fișiere atinse) | curat (13 fișiere) |
-| `next build` | verde, `/bo/packages` inclus |
-| Probe UI | 11 probe, 0 overflow, 2 teme, tastatură — `probe-ui/REZULTATE.md` |
-| `regen.py` artefact | 24 fixture, 21 vectori, clasificare confirmată |
-| Ledger Anvil | 2 baseline + 9 after/review, toate `passed=1` |
+| mypy (fișiere atinse) | curat (10 fișiere) |
+| `next build` | verde |
+| `regen.py` artefact | 29 fixture, 26 vectori, clasificare confirmată |
+| `interop/check_verifier.py` | A01×A02, 0 divergențe |
+| `SHA256SUMS` | verificat OK pe tot artefactul |
+| Probe UI | 11 probe (lot inițial), 0 overflow — verdictul rămâne string-rendered, forma nouă e compatibilă |
 
-## Defecte găsite de proba reală și remediate
+## Defecte remediate (cumulativ)
 
-1. Trust store JSON indentat respins (`\n`) → validatorul acceptă `\n`/`\t`.
-2. Rând REJECTED ocupa slotul UNIQUE → `IntegrityError`/500 la import valid
-   → index unic parțial pe rânduri vii + tratament de cursă în
-   `insert_import`.
-3. Idempotența pe `artifact_set_digest` putea întoarce verdict ACCEPT pentru
-   un manifest modificat neverificat → idempotent = `manifest_digest`
-   identic; manifest diferit = `VERSION_CONFLICT`.
+1. Trust store JSON indentat respins → validatorul acceptă `\n`/`\t`.
+2. Rând REJECTED ocupa slotul UNIQUE → index parțial + cursă tratată.
+3. Idempotența pe `artifact_set_digest` → acum pe `manifest_digest`.
+4. (review) `artifactSetDigest`/`manifestDigest`/verdict/aprobări — vezi §remediere.
 
 ## Migrare / rollback
 
-- Tabel nou `bo_package_imports` + `bo_package_approvals` în `bo_agents.db`
-  (DDL idempotent, `initialize_db`). Nu există instalări anterioare ale
-  acestor tabele — nu e nevoie de migrare.
-- Revenire: revert commit + șterge `bo_packages/` quarantine dir (implicit
-  `./bo_packages`, ignorat de git) — niciun efect extern nu există.
-- Setarea `bo.packages.enabled=false` (implicit) dezactivează complet
-  importul.
+- Tabele `bo_package_imports`/`bo_package_approvals` în `bo_agents.db` (DDL
+  idempotent). Revenire = revert + ștergere `bo_packages/`; fără efecte
+  externe. `bo.packages.enabled=false` dezactivează complet importul.
 
 ## Limite
 
-- Import dintr-un director local al serverului (nu upload de fișiere).
+- Import dintr-un director local al serverului; fără upload de fișiere.
 - Verdictul nu e aprobare de execuție; activarea nu există în acest lot.
-- UI pentru trust store = input text (funcțional; textarea dedicată poate
-  veni ulterior).
-- Cheile din `keys.json` sunt sintetice, doar pentru fixture-uri.
+- Cheile din `keys.json` sunt sintetice; `signature` nu poartă verdictul —
+  autenticitatea vine din canalul de serviciu autentificat.
+- `reasons[0]` poartă `"CODE: detaliu"` — consumatorii compară codul, nu
+  detaliul.
 
 ## Artefacte
 
-- Bundle: `agenti/BO-A01/bo-a01-val2-01.bundle` _(SHA256 în MANIFEST-VAL2-01.json și coordonare/rapoarte/BO-A01/PROGRES.md)_
-- Probe: `rapoarte/BO-A01/VAL2-01/probe-ui/` (11 capturi + rezultate)
-- Contract comun: `coordonare/contracte/bo.package.v1/` (SHA256SUMS inclus)
+- Bundle: `agenti/BO-A01/bo-a01-val2-01.bundle` _(SHA256 în MANIFEST-VAL2-01.json)_
+- Amprenta artefactului: `MANIFEST.json` → `fingerprint_sha256` =
+  `02571944523f2e41f31f61829fd59bd771f053500b82ba9df8048dddacf92d99`
+- Probe: `rapoarte/BO-A01/VAL2-01/probe-ui/`
+- Contract comun: `coordonare/contracte/bo.package.v1/`

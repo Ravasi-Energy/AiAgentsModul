@@ -149,14 +149,19 @@ def list_imports(tenant: str, db_path: Path | None = None) -> list[dict[str, Any
 
 
 def list_installed(tenant: str,
-                   db_path: Path | None = None) -> dict[str, str]:
-    """package_id → latest quarantined/draft version (for downgrade checks)."""
+                   db_path: Path | None = None) -> dict[str, dict[str, str]]:
+    """package_id → {version, artifactSetDigest} of quarantined/draft rows —
+    the digest lets the verifier distinguish an idempotent reimport from a
+    same-version conflict (contract §8)."""
     with get_conn(db_path) as conn:
         rows = conn.execute(
-            """SELECT package_id, version FROM bo_package_imports
+            """SELECT package_id, version, artifact_set_digest
+               FROM bo_package_imports
                WHERE tenant=? AND status IN ('QUARANTINED','DRAFT')""",
             (tenant,)).fetchall()
-    return {r["package_id"]: r["version"] for r in rows}
+    return {r["package_id"]: {"version": r["version"],
+                              "artifactSetDigest": r["artifact_set_digest"]}
+            for r in rows}
 
 
 def set_status(tenant: str, import_id: str, status: str,

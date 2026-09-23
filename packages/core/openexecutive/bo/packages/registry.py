@@ -2,8 +2,12 @@
 
 Authority comes only from this store — never from the package. The registry
 document is JSON; in product it is held in the `bo.packages.trust_store_json`
-setting (admin-owned, audited via the settings CAS/audit path). Rollback
-approvals live in the tenant DB (`store.py`), not here.
+setting (admin-owned, audited via the settings CAS/audit path). Downgrade
+approvals are NOT part of the trust store (contract §3) — they are per-tenant
+records passed to the verifier as context.
+
+`version` and `policy.policyVersion` are REQUIRED declared labels; they are
+bound verbatim into every verdict as `trustVersion`/`policyVersion`.
 """
 from __future__ import annotations
 
@@ -28,6 +32,11 @@ def _require_tz_aware(ts: Any, field_name: str) -> datetime:
     return dt
 
 
+def _str_list(value: Any, field_name: str) -> None:
+    if not isinstance(value, list) or not all(isinstance(x, str) for x in value):
+        raise PackageReject("INVALID_REGISTRY", f"{field_name}: string list expected")
+
+
 class TrustRegistry:
     def __init__(
         self,
@@ -38,6 +47,7 @@ class TrustRegistry:
         policy: dict[str, Any],
     ) -> None:
         self.registry_id = registry_id
+        # declared `version` label — bound verbatim as verdict trustVersion
         self.version = version
         self.publishers = publishers
         self.keys = keys
@@ -50,14 +60,17 @@ class TrustRegistry:
         if set(doc) - {"schemaVersion", "registryId", "version", "updatedAt",
                        "publishers", "keys", "policy"}:
             raise PackageReject("INVALID_REGISTRY", "unknown fields")
-        for f in ("registryId", "version", "updatedAt", "publishers", "keys", "policy"):
+        for f in ("registryId", "version", "updatedAt", "publishers",
+                  "keys", "policy"):
             if f not in doc:
                 raise PackageReject("INVALID_REGISTRY", f"missing {f}")
         if not isinstance(doc["registryId"], str) or \
                 not OPAQUE_ID.match(doc["registryId"]):
             raise PackageReject("INVALID_REGISTRY", "invalid registryId")
-        if not isinstance(doc["version"], str) or not doc["version"]:
+        if not isinstance(doc["version"], str) or not doc["version"] or \
+                len(doc["version"]) > 128:
             raise PackageReject("INVALID_REGISTRY", "invalid version")
+        _require_tz_aware(doc["updatedAt"], "updatedAt")
 
         publishers: dict[str, dict[str, Any]] = {}
         for p in doc["publishers"]:
@@ -68,9 +81,8 @@ class TrustRegistry:
                 raise PackageReject("INVALID_REGISTRY", "invalid publisherId")
             if p["status"] not in ("active", "suspended"):
                 raise PackageReject("INVALID_REGISTRY", "invalid publisher status")
-            if not isinstance(p["allowedKinds"], list) or \
-                    not isinstance(p["keyIds"], list):
-                raise PackageReject("INVALID_REGISTRY", "malformed publisher")
+            _str_list(p["allowedKinds"], "publisher.allowedKinds")
+            _str_list(p["keyIds"], "publisher.keyIds")
             publishers[p["publisherId"]] = p
 
         keys: dict[str, dict[str, Any]] = {}
@@ -104,8 +116,18 @@ class TrustRegistry:
             raise PackageReject("INVALID_REGISTRY", "invalid maxPackageBytes")
         if not isinstance(policy["rollbackRequiresApproval"], bool):
             raise PackageReject("INVALID_REGISTRY", "rollbackRequiresApproval not bool")
-        if not isinstance(policy["policyVersion"], str):
+        if not isinstance(policy["policyVersion"], str) or \
+                not policy["policyVersion"] or len(policy["policyVersion"]) > 128:
             raise PackageReject("INVALID_REGISTRY", "invalid policyVersion")
+        _str_list(policy["allowedKinds"], "policy.allowedKinds")
+        _str_list(policy["capabilityCatalog"], "policy.capabilityCatalog")
+        mcpk = policy.get("maxCapabilitiesPerKind")
+        if mcpk is not None and (
+                not isinstance(mcpk, dict)
+                or not all(isinstance(k, str) for k in mcpk)
+                or not all(isinstance(v, int) and not isinstance(v, bool)
+                           for v in mcpk.values())):
+            raise PackageReject("INVALID_REGISTRY", "invalid maxCapabilitiesPerKind")
 
         for pub_id, pub in publishers.items():
             for kid in pub["keyIds"]:
@@ -114,7 +136,8 @@ class TrustRegistry:
                         "INVALID_REGISTRY",
                         f"{pub_id} references missing key {kid}")
 
-        return cls(doc["registryId"], doc["version"], publishers, keys, policy)
+        return cls(doc["registryId"], doc["version"], publishers, keys,
+                   policy)
 
     def publisher(self, publisher_id: str) -> dict[str, Any] | None:
         return self.publishers.get(publisher_id)

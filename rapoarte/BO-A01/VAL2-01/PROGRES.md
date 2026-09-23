@@ -6,9 +6,31 @@ artefactul comun `coordonare/contracte/bo.package.v1/`.
 Checkout: `agenti/BO-A01/boagents-val2-01`, ramură `bo/val2-01-a01-packages`.
 Base: `46424b5` (origin/main=VAL1-02 merged + delta prototip VAL2-00).
 
-## Stare: TESTAT_LOCAL
+## Stare: TESTAT_LOCAL — remediere după review (INT-201) inclusă
 
-### Livrat
+### Remediere review — convergență cu verificatorul A02
+
+După `RETUR_INTEGRARE`, runtime-ul A01 a fost aliniat complet la contractul
+comun (același PR, aceeași ramură):
+
+- `artifactSetDigest` = sha256 peste JSON-ul compact al listei sortate de
+  perechi `[cale, digest]` (§2 — formula canonică, nu canon. obiectului).
+- `manifestDigest` = sha256 peste payloadul canonic semnat (§5 explicit);
+  rezolvată ambiguitatea brut-vs-canonic.
+- Verdict `bo.package.verdict.v1`: `schemaVersion` obligatoriu, `reasons` =
+  `["<CODE>: <detaliu>"]`, `idempotent` mereu prezent, `approvalRef` doar la
+  ACCEPT autorizat, fără `signature`; schemă dedicată în artefact.
+- `trustVersion`/`policyVersion` = etichete declarate (ambele obligatorii).
+- Downgrade → `ROLLBACK_UNAUTHORIZED` uniform; aprobările din context cer
+  TOATE legăturile; malformate → `REGISTRY_UNAVAILABLE` fail-closed;
+  `approvedRollbacks` eliminat din trust store (contract §3).
+- Artefact: 29 fixture-uri (+5 cazuri de legături), 26 vectori,
+  `verdict_doc` de referință, `MANIFEST.json` cu amprentă stabilă,
+  `interop/check_verifier.py`.
+- **Proba interop A01×A02: 29 cazuri × 2 implementări — 0 divergențe**
+  (clasificare + digesturi + idempotent + approvalRef identice).
+
+### Livrat (primul lot)
 
 - **`openexecutive/bo/packages/`** — modul runtime complet:
   `contract.py` (schemă închisă, limite înainte/în timpul citirii, chei
@@ -51,14 +73,15 @@ Base: `46424b5` (origin/main=VAL1-02 merged + delta prototip VAL2-00).
 
 ### Verificări
 
-- `test_bo_packages.py`: 41 teste (accept, matrice 13 refuzuri, downgrade
-  cu aprobări legate, drift, canon, acces, rute HTTP).
-- Suita `tests/unit` completă: vezi PREDARE.md.
+- `test_bo_packages.py`: 66 teste (accept, matrice refuzuri, downgrade cu
+  aprobări legate, drift, canon, contract verdict, acces, rute HTTP).
+- Suita `tests/unit` completă: **3640 passed, 1 skipped**.
 - ruff + mypy curate pe toate fișierele atinse.
 - `next build` verde; probe UI: 10 capturi `/bo/packages` + tastatură +
   edge viewports + settings booleans — `probe-ui/REZULTATE.md`.
-- `regen.py` artefact comun: 24 fixture-uri, 21 vectori, clasificare
-  auto-confirmată.
+- `regen.py` artefact comun: 29 fixture-uri, 26 vectori, clasificare
+  auto-confirmată; `interop/check_verifier.py`: 0 divergențe A01×A02.
+- Ledger Anvil `val2-01-remediere`: 9 verificări, toate `passed=1`.
 
 ### Limite declarate
 

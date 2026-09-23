@@ -22,6 +22,7 @@ from openexecutive.bo.packages.canon import signed_payload
 from openexecutive.bo.packages.contract import (
     MANIFEST_NAME,
     load_manifest,
+    load_manifest_raw,
     validate_manifest,
 )
 from openexecutive.bo.packages.errors import PackageReject
@@ -66,19 +67,23 @@ def _trust_registry(identity: Identity, db_path: Path | None) -> TrustRegistry:
 
 
 def _approvals(identity: Identity, package_id: str,
-               db_path: Path | None) -> list[Approval]:
+               db_path: Path | None) -> tuple[list[Approval], set[str]]:
     out = []
+    consumed: set[str] = set()
     for r in store.list_approvals(identity.tenant, package_id, db_path=db_path):
         try:
             exp = datetime.fromisoformat(r["expires_at"])
         except (TypeError, ValueError):
             continue
+        if r["consumed_at"] is not None:
+            consumed.add(r["id"])
         out.append(Approval(
-            approval_id=r["id"], tenant_ref=r["tenant"], package_id=r["package_id"],
-            from_version=r["from_version"], to_version=r["to_version"],
+            approval_id=r["id"], package_id=r["package_id"],
+            to_version=r["to_version"], tenant_ref=r["tenant"],
+            from_version=r["from_version"],
             artifact_set_digest=r["artifact_set_digest"], expires_at=exp,
             consumed=r["consumed_at"] is not None, status=r["status"]))
-    return out
+    return out, consumed
 
 
 def _copy_verified(src: Path, dest_root: Path,
@@ -127,13 +132,16 @@ def import_package(
     # An unparseable manifest yields a controlled REJECT verdict — no row is
     # persisted because the package cannot be identified.
     try:
-        manifest = validate_manifest(load_manifest(source_dir / MANIFEST_NAME))
+        manifest, _raw = load_manifest_raw(source_dir / MANIFEST_NAME)
+        manifest = validate_manifest(manifest)
     except PackageReject as e:
         v = Verdict(False, e.code, e.detail, tenant_ref=identity.tenant)
         _audit(identity.tenant, identity.actor, "bo_package_import_rejected",
                f"manifest invalid: {e.code}", v.to_dict())
         return {"verdict": v.to_dict(), "idempotent": False}
     asd = artifact_set_digest(manifest["artifactDigests"])
+    # manifestDigest = sha256 over the canonical signed payload — the same
+    # definition the verifier binds into verdicts (contract §5)
     m_digest = f"sha256:{hashlib.sha256(signed_payload(manifest)).hexdigest()}"
     pkg_id, version = manifest["packageId"], manifest["version"]
 
@@ -155,12 +163,13 @@ def import_package(
 
     registry = _trust_registry(identity, db_path)
     installed = store.list_installed(identity.tenant, db_path=db_path)
-    approvals = _approvals(identity, pkg_id, db_path)
+    approvals, consumed = _approvals(identity, pkg_id, db_path)
 
     verdict = verify_package(
         source_dir, registry,
         tenant_ref=identity.tenant, installed=installed,
-        approvals=approvals, host_version=BO_PRODUCT_VERSION)
+        approvals=approvals, consumed_approvals=consumed,
+        host_version=BO_PRODUCT_VERSION)
 
     if not verdict.accepted:
         row_id = store.insert_import(

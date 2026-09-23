@@ -258,20 +258,22 @@ export function getBoTelemetryStatus(): Promise<BoTelemetryStatus> {
 // ---------------------------------------------------------------------------
 
 export interface BoPackageVerdict {
+  schemaVersion: "bo.package.verdict.v1";
   verdict: "ACCEPT" | "REJECT";
   reasons: string[];
-  packageId: string | null;
-  version: string | null;
-  manifestDigest: string | null;
-  artifactSetDigest: string | null;
-  tenantRef: string | null;
-  publisherId: string | null;
-  keyId: string | null;
-  policyVersion: string | null;
-  trustVersion: string | null;
-  checkedAt: string | null;
-  expiresAt: string | null;
+  packageId: string;
+  version: string;
+  manifestDigest: string;
+  artifactSetDigest: string;
+  tenantRef: string;
+  publisherId: string;
+  keyId: string;
+  policyVersion: string;
+  trustVersion: string;
+  checkedAt: string;
+  expiresAt: string;
   idempotent: boolean;
+  approvalRef?: string;
 }
 
 export interface BoPackageImport {
