@@ -4,10 +4,19 @@ Data: 23.09.2026. Stivă reală: `next start :3100` (build de producție) +
 backend FastAPI :8000, sesiune NextAuth JWT reală (`probe@bo.dev`, admin via
 `BO_ADMIN_EMAILS`). Browser: Google Chrome headless via playwright 1.63.
 
+**Re-probă FIN-01 (head `aea8a8b`, 23.09):** capturile `/bo/packages` pe
+ambele teme × {390, 768, 1440} + verdict expandat + `settings-bo-pachete.png`
+refăcute pe head-ul curent — forma nouă `bo.package.verdict.v1`
+(`schemaVersion`, `reasons=["CODE: detaliu"]`, `idempotent`, `approvalRef`)
+se randează corect, zero overflow. Capturile de edge (699/700/1099/1100) și
+tastatură rămân valabile — nu au fost afectate de remediere.
+
 Date seed-uite prin API real: `bo.packages.enabled=true`,
 `bo.packages.trust_store_json` = `registry.example.json` din artefactul
-comun, import `valid-bobot` (QUARANTINED) + `incompatible-host` (REJECTED) +
-o aprobare activă de downgrade.
+comun, import `valid-bobot` (QUARANTINED → DRAFT prin promovare reală) +
+`incompatible-host` (REJECTED — `VERSION_CONFLICT`, aceeași versiune cu
+manifest diferit, comportamentul corect al contractului) + o aprobare activă
+de downgrade. Reimport identic → `idempotent: true` în anvelopă.
 
 ## `/bo/packages` — 10 capturi + tastatură
 
