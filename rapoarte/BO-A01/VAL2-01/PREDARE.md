@@ -8,7 +8,7 @@ Codex).
 | Repository | `Ravasi-Energy/BOAgents` |
 | Branch | `bo/val2-01-a01-packages` (continuat — același PR) |
 | baseSHA | `46424b5c865bde7e74d3c9f56ea148fc0ae8a4c0` |
-| headSHA | `8092fe40f1d630c15d30e937b065bb1293431e3f` (remediere; raportul actualizat e în commitul următor — `git rev-parse` dă vârful exact) |
+| headSHA | `67a4387f04c172c91b12cab8d90c9f3d5de1e94c` + acest raport (commit documentar; `git rev-parse` dă vârful exact) |
 | PR | https://github.com/Ravasi-Energy/BOAgents/pull/5 (draft, bază `main`) |
 | Artefact comun | `coordonare/contracte/bo.package.v1/` + `MANIFEST.json` (amprentă) |
 
@@ -136,6 +136,20 @@ Coduri de respingere acoperite: `ARTIFACT_MISSING`, `ARTIFACT_MODIFIED`,
 Notă: copiile artefactului din Guardian/Hire aveau 24 cazuri la review;
 consumul versiunii înghețate (29) aparține A02/A03 — eu nu modific
 checkout-urile lor.
+
+## FIN-01 — completări de închidere
+
+- **`cryptography>=43.0.0` în `dependencies`** — `signing.py` o importa
+  direct, dar manifestul o acoperea doar tranzitiv via `google-auth`
+  (aceeași clasă ca INT-201-07). Wheel-ul construit declară
+  `Requires-Dist: cryptography>=43.0.0` și conține `bo/packages/*`.
+- **Matricea parametrilor** — `MATRICE-PARAMETRI.md`: 9 chei `bo.*` +
+  inputurile `/bo/packages`; tip/default/limite, scope, RBAC, persistență,
+  audit, aplicare, probă per parametru. Toți administrabili.
+- **Re-probe pe head** — capturile `/bo/packages` + `settings-bo-pachete`
+  refăcute pe verdictul `bo.package.verdict.v1` (edge/tastatură rămân
+  valabile). Flux live: `enabled` oprit→pornit comută `PACKAGES_DISABLED`→
+  ACCEPT; promovare DRAFT; reimport identic → `idempotent:true`.
 
 ## Artefacte
 
