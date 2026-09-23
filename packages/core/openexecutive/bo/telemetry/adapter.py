@@ -161,6 +161,40 @@ class TelemetryAdapter:
         """Strictly validate an externally-supplied event (fixture endpoint)."""
         return schema.validate_event(event)
 
+    def emit_model_observation(
+        self,
+        *,
+        tenant: str,
+        body: dict[str, Any],
+        occurred_at: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Emit a ``bo.model-observation.v1`` document (VAL3-01, A02 contract).
+
+        Same transport + identity stamping as ``emit``: the caller supplies
+        only the body members (``models`` and/or ``routing``); envelope fields
+        are server-derived. Disabled adapter → dropped before the document is
+        even assembled for the wire (``self.dropped`` counts it).
+        """
+        if not self.enabled:
+            self.dropped += 1
+            return None
+        event = {
+            "schemaVersion": "bo.model-observation.v1",
+            "eventId": f"evt_{uuid.uuid4().hex[:24]}",
+            "producerId": self.producer_id,
+            "product": _PRODUCT,
+            "installationId": self.installation_id,
+            "tenantRef": tenant,
+            "observedAt": occurred_at
+            or datetime.now(UTC)
+            .isoformat(timespec="milliseconds")
+            .replace("+00:00", "Z"),
+            **body,
+        }
+        self.transport.send(event)
+        self.emitted += 1
+        return event
+
 
 _adapter: TelemetryAdapter | None = None
 

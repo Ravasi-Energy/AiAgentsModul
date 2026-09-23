@@ -39,8 +39,10 @@ def initialize_db(db_path: Path | None = None) -> None:
     """Create every BOAgents table idempotently. Called from the lifespan."""
     from openexecutive.bo.bots import store as bots_store
     from openexecutive.bo.packages import store as packages_store
+    from openexecutive.bo.routing import store as routing_store
     from openexecutive.bo.settings import store as settings_store
 
     settings_store.initialize_db(db_path)
     bots_store.initialize_db(db_path)
     packages_store.initialize_db(db_path)
+    routing_store.initialize_db(db_path)

@@ -1,0 +1,616 @@
+"""VAL3-01: observe-mode router — catalog, engine, observations, telemetry.
+
+Probele cerute de mandat: replay determinist, lipsă evaluare/cost, prag
+ratat, buget/regiune/provider interzis, fallback neeligibil, date stale,
+izolare tenant, CAS concurent, pierdere receptor, nicio schimbare a
+modelului real, BoBot cu LLM oprit (fără dependență de router).
+"""
+from __future__ import annotations
+
+import json
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from openexecutive.bo import db as bo_db
+from openexecutive.bo.routing import observe, serialize, store
+from openexecutive.bo.routing.catalog import (
+    CatalogEntry,
+    CatalogValidationError,
+    Cost,
+    Quality,
+)
+from openexecutive.bo.routing.engine import Policy, TaskContext, recommend
+from openexecutive.bo.settings import store as settings_store
+
+from .bo_testkit import capture_audit, use_tmp_db
+
+TENANT = "tenant-a"
+NOW = datetime.now(UTC)
+FRESH = (NOW - timedelta(days=5)).isoformat(timespec="milliseconds").replace(
+    "+00:00", "Z"
+)
+STALE = (NOW - timedelta(days=400)).isoformat(timespec="milliseconds").replace(
+    "+00:00", "Z"
+)
+
+
+@pytest.fixture()
+def db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    return use_tmp_db(tmp_path, monkeypatch)
+
+
+@pytest.fixture(autouse=True)
+def audit(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
+    return capture_audit(monkeypatch)
+
+
+def _entry(
+    *,
+    entry_id: str = "c1",
+    provider: str = "anthropic",
+    model_id: str = "claude-a",
+    model_version: str | None = None,
+    state: str = "ACTIVE",
+    capabilities: tuple[str, ...] = ("analysis",),
+    regions: tuple[str, ...] = ("eu",),
+    cost: Cost | None = None,
+    quality: Quality | None = None,
+) -> CatalogEntry:
+    return CatalogEntry(
+        entry_id=entry_id,
+        provider=provider,
+        model_id=model_id,
+        model_version=model_version,
+        state=state,
+        capabilities=capabilities,
+        regions=regions,
+        cost=cost or Cost("3.00", "15.00", "USD", "2027-12-31"),
+        quality=quality
+        if quality is not None
+        else Quality(0.9, "synthetic", "specialist", "setA", "v1", FRESH, 42),
+        purpose="test",
+        source="admin",
+    )
+
+
+def _policy(**kw: Any) -> Policy:
+    base = dict(
+        allowed_providers=None,
+        allowed_regions=None,
+        required_capabilities=frozenset(),
+        min_quality=0.6,
+        eval_max_age_days=90,
+        max_estimated_cost=None,
+        cost_currency=None,
+    )
+    base.update(kw)
+    return Policy(**base)
+
+
+CTX = TaskContext("specialist", input_tokens=1000, output_tokens=200)
+
+
+# --------------------------------------------------------------------------- #
+# Engine — determinism + filter order
+# --------------------------------------------------------------------------- #
+
+class TestEngine:
+    def test_route_with_met_bar(self) -> None:
+        d = recommend([_entry()], _policy(), CTX)
+        assert d.decision == "ROUTE"
+        assert d.met_bar is True
+        assert d.recommendation == {
+            "provider": "anthropic", "modelId": "claude-a",
+            "modelVersion": None,
+        }
+        assert d.cost_estimate == {
+            "amount": "0.006000", "currency": "USD", "validUntil": "2027-12-31"
+        }
+
+    def test_deterministic_replay(self) -> None:
+        """Same inputs → byte-identical decision (the replay probe)."""
+        catalog = [_entry(), _entry(entry_id="c2", model_id="claude-b")]
+        args = (_policy(), CTX)
+        now = datetime(2026, 9, 24, tzinfo=UTC)
+        d1 = recommend(catalog, *args, now=now)
+        d2 = recommend(list(reversed(catalog)), *args, now=now)
+        assert json.dumps(d1.to_dict(), sort_keys=True) == json.dumps(
+            d2.to_dict(), sort_keys=True
+        )
+
+    def test_tie_break_cost_then_identity(self) -> None:
+        cheap = _entry(entry_id="b", model_id="m-b",
+                       cost=Cost("1.00", "1.00", "USD", "2027-12-31"))
+        dear = _entry(entry_id="a", model_id="m-a",
+                      cost=Cost("9.00", "9.00", "USD", "2027-12-31"))
+        d = recommend([dear, cheap], _policy(), CTX)
+        assert d.recommendation["modelId"] == "m-b"
+
+    def test_provider_denied(self) -> None:
+        p = _policy(allowed_providers=frozenset({"other"}))
+        d = recommend([_entry()], p, CTX)
+        assert d.decision == "REFUSE"
+        assert "PROVIDER_DENIED" in d.reasons
+
+    def test_region_denied(self) -> None:
+        p = _policy(allowed_regions=frozenset({"us"}))
+        d = recommend([_entry(regions=("eu",))], p, CTX)
+        assert "REGION_DENIED" in d.reasons
+        assert d.decision == "REFUSE"
+
+    def test_capability_missing(self) -> None:
+        p = _policy(required_capabilities=frozenset({"vision"}))
+        d = recommend([_entry()], p, CTX)
+        assert "CAPABILITY_MISSING" in d.reasons
+
+    def test_budget_exceeded(self) -> None:
+        p = _policy(max_estimated_cost=Decimal("0.0001"), cost_currency="USD")
+        d = recommend([_entry()], p, CTX)
+        assert "BUDGET_EXCEEDED" in d.reasons
+        assert d.decision == "REFUSE"
+
+    def test_cost_missing_with_budget(self) -> None:
+        no_cost = _entry(cost=Cost(None, None, None, None))
+        p = _policy(max_estimated_cost=Decimal("1.00"), cost_currency="USD")
+        d = recommend([no_cost], p, CTX)
+        assert "COST_DATA_MISSING" in d.reasons
+
+    def test_cost_missing_no_budget_still_eligible(self) -> None:
+        """Unknown cost is not zero — without a cap it stays eligible."""
+        no_cost = _entry(cost=Cost(None, None, None, None))
+        d = recommend([no_cost], _policy(), CTX)
+        assert d.decision == "ROUTE"
+        assert d.cost_estimate is None
+
+    def test_model_disabled(self) -> None:
+        d = recommend([_entry(state="DISABLED")], _policy(), CTX)
+        assert "MODEL_DISABLED" in d.reasons
+
+    def test_eval_missing(self) -> None:
+        no_eval = _entry(quality=Quality(
+            None, "synthetic", "specialist", "setA", "v1", FRESH, 0))
+        d = recommend([no_eval], _policy(), CTX)
+        assert "EVAL_MISSING" in d.reasons
+        assert d.decision == "REFUSE"
+
+    def test_eval_task_mismatch(self) -> None:
+        wrong = _entry(quality=Quality(
+            0.95, "synthetic", "triage", "setA", "v1", FRESH, 10))
+        d = recommend([wrong], _policy(), CTX)
+        assert "EVAL_TASK_MISMATCH" in d.reasons
+
+    def test_stale_evaluation(self) -> None:
+        stale = _entry(quality=Quality(
+            0.95, "synthetic", "specialist", "setA", "v1", STALE, 10))
+        d = recommend([stale], _policy(eval_max_age_days=90), CTX)
+        assert "STALE_EVALUATION" in d.reasons
+
+    def test_quality_bar_unmet(self) -> None:
+        weak = _entry(quality=Quality(
+            0.4, "synthetic", "specialist", "setA", "v1", FRESH, 10))
+        d = recommend([weak], _policy(min_quality=0.6), CTX)
+        assert d.decision == "REFUSE"
+        assert d.met_bar is False
+        assert "QUALITY_BAR_UNMET" in d.reasons
+
+    def test_fallback_does_not_relax_constraints(self) -> None:
+        """A second-ranked candidate that fails filters stays eliminated —
+        fallback never widens rights or budget."""
+        ok = _entry(entry_id="ok")
+        bad_region = _entry(entry_id="fb", model_id="claude-fb",
+                            regions=("cn",))
+        p = _policy(allowed_regions=frozenset({"eu"}))
+        d = recommend([ok, bad_region], p, CTX)
+        assert d.decision == "ROUTE"
+        fb = [c for c in d.candidates if c.entry.entry_id == "fb"][0]
+        assert fb.eligible is False and fb.reason == "REGION_DENIED"
+
+    def test_catalog_empty(self) -> None:
+        d = recommend([], _policy(), CTX)
+        assert d.decision == "REFUSE"
+        assert d.reasons == ["CATALOG_EMPTY"]
+
+    def test_filters_run_before_scoring(self) -> None:
+        """A high-scoring but provider-denied candidate must not win."""
+        denied = _entry(quality=Quality(
+            0.99, "synthetic", "specialist", "setA", "v1", FRESH, 10))
+        ok = _entry(entry_id="ok", model_id="claude-ok",
+                    provider="allowed-p")
+        p = _policy(allowed_providers=frozenset({"allowed-p"}))
+        d = recommend([denied, ok], p, CTX)
+        assert d.recommendation["provider"] == "allowed-p"
+
+
+# --------------------------------------------------------------------------- #
+# Catalog store — CRUD, CAS, isolation
+# --------------------------------------------------------------------------- #
+
+def _fields(**kw: Any) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "provider": "anthropic",
+        "model_id": "claude-x",
+        "model_version": None,
+        "state": "ACTIVE",
+        "capabilities": ["analysis"],
+        "regions": ["eu"],
+        "cost": {
+            "input_per_million": "3.00",
+            "output_per_million": "15.00",
+            "currency": "USD",
+            "valid_until": "2027-12-31",
+        },
+        "quality": {
+            "score": 0.9, "methodology": "synthetic", "task_kind": "specialist",
+            "eval_set_ref": "setA", "eval_set_version": "v1",
+            "observed_at": FRESH, "sample_count": 42,
+        },
+        "purpose": "chat",
+        "source": "admin",
+    }
+    base.update(kw)
+    return base
+
+
+class TestCatalogStore:
+    def test_create_and_list(self, db: Path, audit: list[dict]) -> None:
+        e = store.create_entry(TENANT, _fields(), actor="admin@t")
+        assert e.version == 1
+        assert store.catalog_version(TENANT) == 1
+        listed = store.list_catalog(TENANT)
+        assert [x.entry_id for x in listed] == [e.entry_id]
+        assert listed[0].quality is not None and listed[0].quality.score == 0.9
+        events = [a for a in audit if a["event_type"] == "bo_catalog_change"]
+        assert events and events[0]["details"]["action"] == "create"
+
+    def test_update_cas_conflict(self, db: Path) -> None:
+        e = store.create_entry(TENANT, _fields(), actor="admin@t")
+        store.update_entry(TENANT, e.entry_id, _fields(state="DISABLED"),
+                           expected_version=1, actor="admin@t")
+        with pytest.raises(store.ConflictError):
+            store.update_entry(TENANT, e.entry_id, _fields(),
+                               expected_version=1, actor="admin@t")
+
+    def test_duplicate_identity_rejected(self, db: Path) -> None:
+        store.create_entry(TENANT, _fields(), actor="admin@t")
+        with pytest.raises(store.DuplicateEntryError):
+            store.create_entry(TENANT, _fields(), actor="admin@t")
+
+    def test_tenant_isolation(self, db: Path) -> None:
+        store.create_entry("tenant-a", _fields(), actor="a@t")
+        assert store.list_catalog("tenant-b") == []
+        assert store.catalog_version("tenant-b") == 0
+        with pytest.raises(store.NotFoundError):
+            e = store.list_catalog("tenant-a")[0]
+            store.get_entry("tenant-b", e.entry_id)
+
+    def test_invalid_entry_rejected(self, db: Path) -> None:
+        with pytest.raises(CatalogValidationError):
+            store.create_entry(
+                TENANT, _fields(provider="bad provider@x"), actor="a@t"
+            )
+        with pytest.raises(CatalogValidationError):
+            store.create_entry(
+                TENANT, _fields(quality={"score": 1.5, "methodology": "m",
+                                         "task_kind": "t", "eval_set_ref": "r",
+                                         "eval_set_version": "v",
+                                         "observed_at": FRESH,
+                                         "sample_count": 1}),
+                actor="a@t",
+            )
+
+
+# --------------------------------------------------------------------------- #
+# Observe hook — settings gate, persistence, telemetry, receiver loss
+# --------------------------------------------------------------------------- #
+
+class TestObserve:
+    def _enable(self, db: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("BO_TENANT_ID", TENANT)
+        settings_store.set_value(
+            TENANT, "bo.router.observe_enabled", True,
+            expected_version=0, actor="admin@t", db_path=db,
+        )
+
+    def test_disabled_by_default_no_write(
+        self, db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("BO_TENANT_ID", TENANT)
+        out = observe.observe_call(
+            model="claude-sonnet-5", actor="specialist",
+            counts={"input_tokens": 10, "output_tokens": 5},
+        )
+        assert out is None
+        assert store.list_observations(TENANT) == []
+
+    def test_observation_persisted(
+        self, db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._enable(db, monkeypatch)
+        store.create_entry(TENANT, _fields(), actor="admin@t", db_path=db)
+        out = observe.observe_call(
+            model="claude-sonnet-5", actor="specialist",
+            counts={"input_tokens": 1000, "output_tokens": 200,
+                    "cost_usd": 0.006},
+            turn_id="turn-1",
+        )
+        assert out is not None and out["decision"] == "ROUTE"
+        rows = store.list_observations(TENANT)
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["correlation_id"] == "turn-1"
+        assert row["task_kind"] == "specialist"
+        assert row["actual_route"]["modelId"] == "claude-sonnet-5"
+        assert row["actual_route"]["provider"] == "anthropic"
+        assert row["met_bar"] is True
+        assert row["measured"]["inputTokens"] == 1000
+        assert row["billed"]["evidenceRef"] == "provider:usage.cost"
+        # Telemetry disabled by default → persisted but undelivered.
+        assert row["delivered"] is False
+
+    def test_actual_route_unchanged_regardless_of_recommendation(
+        self, db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The observed REFUSE never rewrites the real route — the probe for
+        'nicio schimbare a modelului real'."""
+        self._enable(db, monkeypatch)
+        store.create_entry(
+            TENANT, _fields(provider="other-vendor"), actor="a@t", db_path=db)
+        settings_store.set_value(
+            TENANT, "bo.router.allowed_providers", "anthropic",
+            expected_version=0, actor="admin@t", db_path=db)
+        out = observe.observe_call(
+            model="claude-sonnet-5", actor="specialist", counts=None)
+        assert out is not None
+        row = store.list_observations(TENANT)[0]
+        assert row["decision"] == "REFUSE"
+        assert row["actual_route"]["modelId"] == "claude-sonnet-5"
+        assert "PROVIDER_DENIED" in row["reasons"]
+
+    def test_receiver_loss_persists_and_flushes(
+        self, db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._enable(db, monkeypatch)
+        store.create_entry(TENANT, _fields(), actor="a@t", db_path=db)
+
+        from openexecutive.bo.telemetry import adapter as tel
+
+        class Down:
+            def send(self, event: dict) -> None:
+                raise ConnectionError("guardian down")
+
+        monkeypatch.setattr(
+            tel, "_adapter", tel.TelemetryAdapter(enabled=True, transport=Down())
+        )
+        observe.observe_call(
+            model="claude-x", actor="specialist", counts=None)
+        row = store.list_observations(TENANT)[0]
+        assert row["delivered"] is False
+        assert "guardian down" in (row["delivery_error"] or "")
+
+        sent: list[dict] = []
+
+        class Up:
+            def send(self, event: dict) -> None:
+                sent.append(event)
+
+        monkeypatch.setattr(
+            tel, "_adapter", tel.TelemetryAdapter(enabled=True, transport=Up())
+        )
+        res = observe.flush_pending(TENANT)
+        assert res == {"sent": 1, "failed": 0}
+        assert sent and sent[0]["schemaVersion"] == "bo.model-observation.v1"
+        assert sent[0]["product"] == "BOAgents"
+        assert sent[0]["tenantRef"] == TENANT
+        assert store.list_observations(TENANT)[0]["delivered"] is True
+
+    def test_retention_sweep(
+        self, db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._enable(db, monkeypatch)
+        observe.observe_call(model="m", actor="triage", counts=None)
+        deleted = store.sweep_observations(TENANT, 0 + 1)
+        assert deleted == 0  # fresh row survives
+        assert store.sweep_observations(TENANT, 1) == 0
+        # A row backdated beyond retention is removed.
+        with bo_db.get_conn() as conn:
+            conn.execute(
+                "UPDATE bo_route_observations SET occurred_at = ?",
+                ("2020-01-01T00:00:00Z",),
+            )
+        assert store.sweep_observations(TENANT, 1) == 1
+
+
+# --------------------------------------------------------------------------- #
+# Wire contract — serializer output validates against bo.model-observation.v1
+# --------------------------------------------------------------------------- #
+
+class TestWireContract:
+    SCHEMA = json.loads(
+        (Path(__file__).parent / "fixtures"
+         / "bo.model-observation.v1.schema.json").read_text()
+    )
+
+    def _validate(self, doc: dict[str, Any]) -> None:
+        import jsonschema
+
+        jsonschema.validate(doc, self.SCHEMA)
+
+    def test_routing_doc_validates(self) -> None:
+        body = serialize.routing_body(
+            correlation_id="turn-1", policy_version="pol_x",
+            catalog_version="cat_v3", task_kind="specialist",
+            recommendation={"provider": "anthropic", "modelId": "claude-a",
+                            "modelVersion": None},
+            actual_route={"provider": "anthropic", "modelId": "claude-b",
+                          "modelVersion": None},
+            met_bar=True, reasons=[],
+            cost_estimate={"amount": "0.006000", "currency": "USD",
+                           "validUntil": "2027-12-31"},
+            measured={"inputTokens": 1000, "outputTokens": 200,
+                      "requests": 1},
+            billed={"amount": "0.006", "currency": "USD",
+                    "validUntil": "2026-09-24",
+                    "evidenceRef": "provider:usage.cost"},
+        )
+        doc = {
+            "schemaVersion": "bo.model-observation.v1",
+            "eventId": "evt_1", "producerId": "boagents",
+            "product": "BOAgents", "installationId": "inst-1",
+            "tenantRef": "tenant-a", "observedAt": FRESH,
+            **body,
+        }
+        self._validate(doc)
+
+    def test_refuse_doc_validates(self) -> None:
+        body = serialize.routing_body(
+            correlation_id="turn-2", policy_version="pol_x",
+            catalog_version="cat_v0", task_kind="specialist",
+            recommendation=None, actual_route=None,
+            met_bar=False, reasons=["QUALITY_BAR_UNMET"],
+            cost_estimate=None, measured=None, billed=None,
+        )
+        doc = {
+            "schemaVersion": "bo.model-observation.v1",
+            "eventId": "evt_2", "producerId": "boagents",
+            "product": "BOAgents", "installationId": "inst-1",
+            "tenantRef": "tenant-a", "observedAt": FRESH,
+            **body,
+        }
+        self._validate(doc)
+
+    def test_models_doc_validates(self) -> None:
+        e = _entry()
+        body = serialize.models_body(
+            [e], owner_ref="tenant:tenant-a", last_seen=FRESH,
+            sync_id="sync_1", complete=True)
+        doc = {
+            "schemaVersion": "bo.model-observation.v1",
+            "eventId": "evt_3", "producerId": "boagents",
+            "product": "BOAgents", "installationId": "inst-1",
+            "tenantRef": "tenant-a", "observedAt": FRESH,
+            **body,
+        }
+        self._validate(doc)
+        model = doc["models"][0]
+        assert model["quality"]["score"] == 0.9
+        assert model["modelVersion"] is None  # unknown stays explicit
+
+
+# --------------------------------------------------------------------------- #
+# BoBots must not gain an LLM/router dependency
+# --------------------------------------------------------------------------- #
+
+# --------------------------------------------------------------------------- #
+# HTTP surface — RBAC, CAS over the wire, tenant isolation
+# --------------------------------------------------------------------------- #
+
+class TestRoutes:
+    ADMIN = {"x-caller-email": "admin@test"}
+    VIEWER = {"x-caller-email": "viewer@test"}
+
+    @pytest.fixture()
+    def client(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from openexecutive.api.routes import bo as bo_route
+
+        use_tmp_db(tmp_path, monkeypatch)
+        monkeypatch.setenv("BO_TENANT_ID", "tenant-a")
+        monkeypatch.setenv("BO_ADMIN_EMAILS", "admin@test")
+        app = FastAPI()
+        app.include_router(bo_route.router)
+        bo_route.register_error_handlers(app)
+        return TestClient(app)
+
+    def test_catalog_requires_admin_write(self, client) -> None:
+        resp = client.post("/bo/routing/catalog", headers=self.VIEWER,
+                           json=_fields())
+        assert resp.status_code == 403
+        resp = client.get("/bo/routing/catalog", headers=self.VIEWER)
+        assert resp.status_code == 200
+        assert resp.json()["entries"] == []
+
+    def test_catalog_crud_and_cas_over_http(self, client) -> None:
+        resp = client.post("/bo/routing/catalog", headers=self.ADMIN,
+                           json=_fields())
+        assert resp.status_code == 201, resp.text
+        entry = resp.json()["entry"]
+        assert entry["version"] == 1
+
+        # stale CAS → 409
+        resp = client.put(
+            f"/bo/routing/catalog/{entry['entry_id']}", headers=self.ADMIN,
+            json={**_fields(state="DISABLED"), "expected_version": 99})
+        assert resp.status_code == 409
+
+        resp = client.put(
+            f"/bo/routing/catalog/{entry['entry_id']}", headers=self.ADMIN,
+            json={**_fields(state="DISABLED"), "expected_version": 1})
+        assert resp.status_code == 200
+        assert resp.json()["entry"]["state"] == "DISABLED"
+        assert resp.json()["entry"]["version"] == 2
+
+    def test_catalog_validation_422(self, client) -> None:
+        resp = client.post("/bo/routing/catalog", headers=self.ADMIN,
+                           json=_fields(provider="bad provider"))
+        assert resp.status_code == 422
+
+    def test_status_and_observations_shape(self, client) -> None:
+        resp = client.get("/bo/routing/status", headers=self.VIEWER)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["observe_enabled"] is False
+        assert body["mode"] == "observare"
+        resp = client.get("/bo/routing/observations", headers=self.VIEWER)
+        assert resp.status_code == 200
+        assert resp.json()["observations"] == []
+
+    def test_settings_new_keys_roundtrip(self, client) -> None:
+        resp = client.put(
+            "/bo/settings/bo.router.observe_enabled", headers=self.ADMIN,
+            json={"value": True, "expected_version": 0})
+        assert resp.status_code == 200, resp.text
+        resp = client.get("/bo/routing/status", headers=self.VIEWER)
+        assert resp.json()["observe_enabled"] is True
+
+        # invalid CSV rejected
+        resp = client.put(
+            "/bo/settings/bo.router.allowed_providers", headers=self.ADMIN,
+            json={"value": "bad provider x", "expected_version": 0})
+        assert resp.status_code == 422
+
+        # invalid cost cap rejected
+        resp = client.put(
+            "/bo/settings/bo.router.max_estimated_cost", headers=self.ADMIN,
+            json={"value": "abc", "expected_version": 0})
+        assert resp.status_code == 422
+        resp = client.put(
+            "/bo/settings/bo.router.max_estimated_cost", headers=self.ADMIN,
+            json={"value": "0.05 USD", "expected_version": 0})
+        assert resp.status_code == 200
+
+
+def test_bobots_have_no_router_dependency() -> None:
+    """Static check: no bo.bots module imports bo.routing or providers."""
+    import ast
+
+    bots_dir = (
+        Path(__file__).parents[2] / "openexecutive" / "bo" / "bots"
+    )
+    for src in bots_dir.glob("*.py"):
+        tree = ast.parse(src.read_text())
+        for node in ast.walk(tree):
+            names: list[str] = []
+            if isinstance(node, ast.Import):
+                names = [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                names = [node.module]
+            for n in names:
+                assert "bo.routing" not in n and "providers" not in n, (
+                    f"{src.name} imports {n} — BoBots stay LLM-free"
+                )

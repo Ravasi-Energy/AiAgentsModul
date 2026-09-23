@@ -31,6 +31,8 @@ from openexecutive.bo.bots import store as bot_store
 from openexecutive.bo.packages import service as pkg_service
 from openexecutive.bo.packages import store as pkg_store
 from openexecutive.bo.packages.errors import PackageReject
+from openexecutive.bo.routing import observe as routing_observe
+from openexecutive.bo.routing import store as routing_store
 from openexecutive.bo.settings import store as settings_store
 from openexecutive.bo.settings.registry import SettingValidationError
 from openexecutive.bo.telemetry.adapter import get_adapter, opaque_actor_ref
@@ -95,6 +97,10 @@ def register_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(bot_store.StateError, _bo_conflict)  # type: ignore[arg-type]
     app.add_exception_handler(pkg_store.StateError, _bo_conflict)  # type: ignore[arg-type]
     app.add_exception_handler(PackageReject, _bo_invalid)  # type: ignore[arg-type]
+    app.add_exception_handler(routing_store.NotFoundError, _bo_not_found)  # type: ignore[arg-type]
+    app.add_exception_handler(routing_store.ConflictError, _bo_conflict)  # type: ignore[arg-type]
+    app.add_exception_handler(routing_store.DuplicateEntryError, _bo_conflict)  # type: ignore[arg-type]
+    app.add_exception_handler(routing_store.CatalogValidationError, _bo_invalid)  # type: ignore[arg-type]
     app.add_exception_handler(bot_service.ValidationFailure, _bo_invalid)  # type: ignore[arg-type]
     app.add_exception_handler(bot_service.SimulationRefused, _bo_invalid)  # type: ignore[arg-type]
     app.add_exception_handler(SettingValidationError, _bo_invalid)  # type: ignore[arg-type]
@@ -374,3 +380,130 @@ def create_package_approval(body: _ApprovalCreate, ident: BoIdentity) -> Any:
 def revoke_package_approval(approval_id: str, ident: BoIdentity) -> Any:
     pkg_service.revoke_approval(ident, approval_id)
     return {"ok": True}
+
+
+# --------------------------------------------------------------------------- #
+# Observe-mode router (VAL3-01) — administered catalog + observations.
+# Everything here is observational: the real model route is never changed.
+# --------------------------------------------------------------------------- #
+
+class _CatalogEntryBody(BaseModel):
+    provider: str = Field(min_length=1, max_length=128)
+    model_id: str = Field(min_length=1, max_length=128)
+    model_version: str | None = Field(default=None, max_length=128)
+    state: str = "ACTIVE"
+    capabilities: list[str] = Field(default_factory=list, max_length=16)
+    regions: list[str] = Field(default_factory=list, max_length=16)
+    cost: dict[str, Any] = Field(default_factory=dict)
+    quality: dict[str, Any] | None = None
+    purpose: str = Field(min_length=1, max_length=128)
+    source: str = Field(min_length=1, max_length=128)
+
+
+class _CatalogEntryPatch(_CatalogEntryBody):
+    expected_version: int = Field(ge=1)
+
+
+def _entry_json(entry: Any) -> dict[str, Any]:
+    return {
+        "entry_id": entry.entry_id,
+        "provider": entry.provider,
+        "model_id": entry.model_id,
+        "model_version": entry.model_version,
+        "state": entry.state,
+        "capabilities": list(entry.capabilities),
+        "regions": list(entry.regions),
+        "cost": entry.cost.to_dict(),
+        "quality": entry.quality.to_dict() if entry.quality else None,
+        "purpose": entry.purpose,
+        "source": entry.source,
+        "version": entry.version,
+        "updated_by": entry.updated_by,
+        "updated_at": entry.updated_at,
+    }
+
+
+@router.get("/routing/catalog")
+def list_routing_catalog(ident: BoIdentity) -> Any:
+    bo_identity.require(ident, "routing:read")
+    return {
+        "catalog_version": f"cat_v{routing_store.catalog_version(ident.tenant)}",
+        "entries": [
+            _entry_json(e) for e in routing_store.list_catalog(ident.tenant)
+        ],
+        "role": ident.role,
+    }
+
+
+@router.post("/routing/catalog", status_code=201)
+def create_routing_entry(body: _CatalogEntryBody, ident: BoIdentity) -> Any:
+    bo_identity.require(ident, "routing:write")
+    entry = routing_store.create_entry(
+        ident.tenant, body.model_dump(exclude={"expected_version"}), actor=ident.actor
+    )
+    routing_observe.emit_catalog_sync(ident.tenant)
+    return {"entry": _entry_json(entry)}
+
+
+@router.put("/routing/catalog/{entry_id}")
+def update_routing_entry(
+    entry_id: str, body: _CatalogEntryPatch, ident: BoIdentity
+) -> Any:
+    bo_identity.require(ident, "routing:write")
+    entry = routing_store.update_entry(
+        ident.tenant, entry_id,
+        body.model_dump(exclude={"expected_version"}),
+        expected_version=body.expected_version, actor=ident.actor,
+    )
+    routing_observe.emit_catalog_sync(ident.tenant)
+    return {"entry": _entry_json(entry)}
+
+
+@router.get("/routing/observations")
+def list_routing_observations(
+    ident: BoIdentity,
+    decision: str | None = None,
+    task_kind: str | None = None,
+    met_bar: bool | None = None,
+    limit: int = 100,
+) -> Any:
+    bo_identity.require(ident, "routing:read")
+    return {
+        "observations": routing_store.list_observations(
+            ident.tenant,
+            decision=decision, task_kind=task_kind, met_bar=met_bar,
+            limit=limit,
+        )
+    }
+
+
+@router.get("/routing/observations/{obs_id}")
+def get_routing_observation(obs_id: str, ident: BoIdentity) -> Any:
+    bo_identity.require(ident, "routing:read")
+    return {
+        "observation": routing_store.get_observation(ident.tenant, obs_id)
+    }
+
+
+@router.get("/routing/status")
+def routing_status(ident: BoIdentity) -> Any:
+    bo_identity.require(ident, "routing:read")
+    observe_enabled = settings_store.get_effective_value(
+        ident.tenant, "bo.router.observe_enabled"
+    )
+    return {
+        "observe_enabled": observe_enabled,
+        "mode": "observare",
+        "catalog_version": f"cat_v{routing_store.catalog_version(ident.tenant)}",
+        **routing_store.observation_stats(ident.tenant),
+        "note": "Routerul este strict în mod observare: nu schimbă modelul "
+                "folosit și nu blochează execuția.",
+    }
+
+
+@router.post("/routing/flush")
+def flush_routing_observations(ident: BoIdentity) -> Any:
+    """Retry delivery of observations persisted while the receiver was
+    unavailable — local retention + explicit retry, never silent loss."""
+    bo_identity.require(ident, "routing:write")
+    return routing_observe.flush_pending(ident.tenant)

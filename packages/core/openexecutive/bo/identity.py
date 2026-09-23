@@ -48,6 +48,8 @@ _CAP_MIN_ROLE: dict[str, Role] = {
     "telemetry:read": "viewer",
     "packages:read": "viewer",
     "packages:write": "admin",
+    "routing:read": "viewer",
+    "routing:write": "admin",
 }
 
 

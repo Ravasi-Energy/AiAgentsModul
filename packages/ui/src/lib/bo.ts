@@ -358,3 +358,163 @@ export function createBoPackageApproval(payload: {
 export function revokeBoPackageApproval(id: string): Promise<{ ok: boolean }> {
   return req(`/packages-approvals/${id}/revoke`, { method: "POST" });
 }
+
+// ---------------------------------------------------------------------------
+// Routing (VAL3-01) — administered catalog + observe-mode observations
+// ---------------------------------------------------------------------------
+
+export interface BoModelCost {
+  input_per_million: string | null;
+  output_per_million: string | null;
+  currency: string | null;
+  valid_until: string | null;
+}
+
+export interface BoModelQuality {
+  score: number | null;
+  methodology: string;
+  task_kind: string;
+  eval_set_ref: string;
+  eval_set_version: string;
+  observed_at: string;
+  sample_count: number;
+}
+
+export interface BoCatalogEntry {
+  entry_id: string;
+  provider: string;
+  model_id: string;
+  model_version: string | null;
+  state: "ACTIVE" | "DISABLED" | "DEPRECATED";
+  capabilities: string[];
+  regions: string[];
+  cost: BoModelCost;
+  quality: BoModelQuality | null;
+  purpose: string;
+  source: string;
+  version: number;
+  updated_by: string | null;
+  updated_at: string | null;
+}
+
+export interface BoRouteChoice {
+  provider: string;
+  modelId: string;
+  modelVersion: string | null;
+}
+
+export interface BoRouteObservation {
+  obs_id: string;
+  occurred_at: string;
+  correlation_id: string;
+  task_kind: string;
+  actor_ref: string;
+  policy_version: string;
+  catalog_version: string;
+  decision: "ROUTE" | "REFUSE";
+  met_bar: boolean;
+  reasons: string[];
+  recommendation: BoRouteChoice | null;
+  actual_route: BoRouteChoice | null;
+  cost_estimate: { amount: string; currency: string; validUntil: string } | null;
+  measured: Record<string, number> | null;
+  billed: Record<string, unknown> | null;
+  detail: {
+    candidates: {
+      ref: BoRouteChoice;
+      eligible: boolean;
+      reason: string | null;
+      estimated_cost: string | null;
+      score: number | null;
+    }[];
+  };
+  delivered: boolean;
+  delivery_error: string | null;
+}
+
+export interface BoRoutingStatus {
+  observe_enabled: boolean;
+  mode: string;
+  catalog_version: string;
+  total: number;
+  pending_delivery: number;
+  met_bar: number;
+  last_at: string | null;
+  note: string;
+}
+
+export function getBoRoutingCatalog(): Promise<{
+  catalog_version: string;
+  entries: BoCatalogEntry[];
+  role: string;
+}> {
+  return req("/routing/catalog");
+}
+
+export function createBoCatalogEntry(payload: {
+  provider: string;
+  model_id: string;
+  model_version?: string | null;
+  state?: string;
+  capabilities?: string[];
+  regions?: string[];
+  cost?: Partial<BoModelCost>;
+  quality?: Partial<BoModelQuality> | null;
+  purpose: string;
+  source: string;
+}): Promise<{ entry: BoCatalogEntry }> {
+  return req("/routing/catalog", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export function updateBoCatalogEntry(
+  id: string,
+  payload: {
+    provider: string;
+    model_id: string;
+    model_version?: string | null;
+    state?: string;
+    capabilities?: string[];
+    regions?: string[];
+    cost?: Partial<BoModelCost>;
+    quality?: Partial<BoModelQuality> | null;
+    purpose: string;
+    source: string;
+    expected_version: number;
+  },
+): Promise<{ entry: BoCatalogEntry }> {
+  return req(`/routing/catalog/${id}`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export function listBoRouteObservations(params?: {
+  decision?: string;
+  task_kind?: string;
+  met_bar?: boolean;
+  limit?: number;
+}): Promise<{ observations: BoRouteObservation[] }> {
+  const q = new URLSearchParams();
+  if (params?.decision) q.set("decision", params.decision);
+  if (params?.task_kind) q.set("task_kind", params.task_kind);
+  if (params?.met_bar !== undefined) q.set("met_bar", String(params.met_bar));
+  if (params?.limit) q.set("limit", String(params.limit));
+  const qs = q.toString();
+  return req(`/routing/observations${qs ? `?${qs}` : ""}`);
+}
+
+export function getBoRoutingStatus(): Promise<BoRoutingStatus> {
+  return req("/routing/status");
+}
+
+export function flushBoRoutingObservations(): Promise<{
+  sent: number;
+  failed: number;
+}> {
+  return req("/routing/flush", { method: "POST" });
+}
