@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-SettingType = Literal["text", "enum", "integer", "timezone"]
+SettingType = Literal["text", "enum", "integer", "timezone", "boolean"]
 ApplyMode = Literal["IMMEDIATE", "NEW_RUN", "RESTART", "MIGRATION"]
 Scope = Literal["tenant"]
 
@@ -59,6 +59,42 @@ def _validate_int(v: Any, *, minimum: int, maximum: int, label: str) -> int:
         raise SettingValidationError(
             f"{label}: valoarea trebuie să fie între {minimum} și {maximum}"
         )
+    return v
+
+
+def _validate_bool(v: Any, *, label: str) -> bool:
+    if not isinstance(v, bool):
+        raise SettingValidationError(f"{label}: așteptat true/false")
+    return v
+
+
+def _validate_trust_store(v: Any) -> str:
+    """Text = document bo.package.registry.v1 validat structural la salvare.
+
+    Unlike `_validate_text`, JSON pretty-printing characters `\n` and `\t`
+    are legal here — only the remaining control characters are rejected."""
+    if not isinstance(v, str):
+        raise SettingValidationError("Trust store: așteptat text")
+    v = v.strip()
+    if len(v) > 262144:
+        raise SettingValidationError("Trust store: peste limita de 256 KiB")
+    if _CONTROL_CHAR_RE.search(v.replace("\n", "").replace("\t", "")):
+        raise SettingValidationError("Trust store: caractere de control interzise")
+    if not v:
+        return v
+    import json
+
+    from openexecutive.bo.packages.errors import PackageReject
+    from openexecutive.bo.packages.registry import TrustRegistry
+
+    try:
+        doc = json.loads(v)
+    except json.JSONDecodeError as exc:
+        raise SettingValidationError(f"Trust store: JSON invalid ({exc.msg})") from exc
+    try:
+        TrustRegistry.from_dict(doc)
+    except PackageReject as exc:
+        raise SettingValidationError(f"Trust store: {exc}") from exc
     return v
 
 
@@ -206,6 +242,79 @@ REGISTRY: dict[str, SettingSpec] = {
         effect_ro="La următoarea curățare se șterg doar rulările de simulare mai vechi decât pragul.",
         acceptance_ro="Sweep-ul șterge doar rulări de simulare expirate; auditul rămâne neatins.",
         validate=lambda v: _validate_int(v, minimum=1, maximum=3650, label="Retenția"),
+    ),
+    "bo.packages.enabled": SettingSpec(
+        key="bo.packages.enabled",
+        type="boolean",
+        default=False,
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="general",
+        label_ro="Import pachete semnate",
+        label_en="Signed package import",
+        help_ro="Permite importul de pachete bo.package.v1 în carantină. Oprit implicit.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Pornit: POST /bo/packages/import acceptă pachete; oprit: orice import e respins.",
+        acceptance_ro="Oprit implicit; importul refuză cu PACKAGES_DISABLED când e oprit.",
+        validate=lambda v: _validate_bool(v, label="Import pachete"),
+    ),
+    "bo.packages.max_package_bytes": SettingSpec(
+        key="bo.packages.max_package_bytes",
+        type="integer",
+        default=8 * 1024 * 1024,
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="general",
+        label_ro="Dimensiune maximă pachet (octeți)",
+        label_en="Max package size (bytes)",
+        help_ro="Plafon suplimentar peste cel din trust store; verificarea folosește minimul.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Se aplică la următorul import; nu redeschide verdictul existent.",
+        acceptance_ro="Pachetul peste limită este respins cu PACKAGE_TOO_LARGE înainte/după citire parțială.",
+        validate=lambda v: _validate_int(
+            v, minimum=65536, maximum=268435456, label="Dimensiunea maximă"),
+    ),
+    "bo.packages.trust_store_json": SettingSpec(
+        key="bo.packages.trust_store_json",
+        type="text",
+        default="",
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="general",
+        label_ro="Trust store pachete (JSON)",
+        label_en="Package trust store (JSON)",
+        help_ro="Document bo.package.registry.v1 cu emitenți, chei și politică. Gol = niciun pachet nu verifică.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Se aplică la următorul import; părțile revocate nu mai verifică.",
+        acceptance_ro="JSON invalid sau registru malformat este respins la salvare.",
+        validate=lambda v: _validate_trust_store(v),
+    ),
+    "bo.packages.rollback_requires_approval": SettingSpec(
+        key="bo.packages.rollback_requires_approval",
+        type="boolean",
+        default=True,
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="general",
+        label_ro="Downgrade doar cu aprobare",
+        label_en="Rollback requires approval",
+        help_ro="Reinstalarea unei versiuni <= cea importată cere aprobare legată de digest.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Aplicat la fiecare import; dezactivarea permite downgrade fără aprobare.",
+        acceptance_ro="Fără aprobare activă legată de tenant/digest/versiuni → ROLLBACK_UNAUTHORIZED.",
+        validate=lambda v: _validate_bool(v, label="Aprobare downgrade"),
     ),
 }
 

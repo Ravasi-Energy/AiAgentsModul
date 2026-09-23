@@ -52,6 +52,8 @@ function SettingEditor({
         return;
       }
       value = n;
+    } else if (setting.type === "boolean") {
+      value = draft === "true";
     }
     try {
       const res = await putBoSetting(setting.key, value, setting.version);
@@ -105,7 +107,7 @@ function SettingEditor({
       <div className="bo-row" style={{ marginTop: 12, alignItems: "flex-end" }}>
         <div style={{ flex: 1, minWidth: 200 }}>
           <Field label="" htmlFor={inputId}>
-            {setting.type === "enum" ? (
+            {setting.type === "enum" || setting.type === "boolean" ? (
               <select
                 id={inputId}
                 className="bo-select"
@@ -115,8 +117,17 @@ function SettingEditor({
                 onChange={(e) => setDraft(e.target.value)}
                 aria-label={setting.label_ro}
               >
-                <option value="ro">Română</option>
-                <option value="en">Engleză</option>
+                {setting.type === "boolean" ? (
+                  <>
+                    <option value="false">Oprit</option>
+                    <option value="true">Pornit</option>
+                  </>
+                ) : (
+                  <>
+                    <option value="ro">Română</option>
+                    <option value="en">Engleză</option>
+                  </>
+                )}
               </select>
             ) : (
               <input

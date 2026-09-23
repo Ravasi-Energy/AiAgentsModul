@@ -17,6 +17,7 @@ telemetry adapter is disabled unless explicitly configured.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Body, Depends, FastAPI, Request
@@ -27,6 +28,9 @@ from openexecutive.bo import identity as bo_identity
 from openexecutive.bo.bots import examples as bot_examples
 from openexecutive.bo.bots import service as bot_service
 from openexecutive.bo.bots import store as bot_store
+from openexecutive.bo.packages import service as pkg_service
+from openexecutive.bo.packages import store as pkg_store
+from openexecutive.bo.packages.errors import PackageReject
 from openexecutive.bo.settings import store as settings_store
 from openexecutive.bo.settings.registry import SettingValidationError
 from openexecutive.bo.telemetry.adapter import get_adapter, opaque_actor_ref
@@ -74,6 +78,9 @@ async def _bo_invalid(_req: Request, exc: Exception) -> JSONResponse:
         return _bo_json(422, "simulation_refused", str(exc))
     if isinstance(exc, TelemetrySchemaError):
         return _bo_json(422, "invalid_telemetry", str(exc))
+    if isinstance(exc, PackageReject):
+        return _bo_json(422, "package_rejected",
+                        {"code": exc.code, "detail": exc.detail})
     return _bo_json(422, "invalid_value", str(exc))
 
 
@@ -81,10 +88,13 @@ def register_error_handlers(app: FastAPI) -> None:
     """Map BO domain exceptions to HTTP responses on ``app``."""
     app.add_exception_handler(bo_identity.IdentityError, _bo_identity_exc)  # type: ignore[arg-type]
     app.add_exception_handler(bot_store.NotFoundError, _bo_not_found)  # type: ignore[arg-type]
+    app.add_exception_handler(pkg_store.NotFoundError, _bo_not_found)  # type: ignore[arg-type]
     app.add_exception_handler(settings_store.UnknownSettingError, _bo_not_found)  # type: ignore[arg-type]
     app.add_exception_handler(bot_store.ConflictError, _bo_conflict)  # type: ignore[arg-type]
     app.add_exception_handler(settings_store.ConfigConflictError, _bo_conflict)  # type: ignore[arg-type]
     app.add_exception_handler(bot_store.StateError, _bo_conflict)  # type: ignore[arg-type]
+    app.add_exception_handler(pkg_store.StateError, _bo_conflict)  # type: ignore[arg-type]
+    app.add_exception_handler(PackageReject, _bo_invalid)  # type: ignore[arg-type]
     app.add_exception_handler(bot_service.ValidationFailure, _bo_invalid)  # type: ignore[arg-type]
     app.add_exception_handler(bot_service.SimulationRefused, _bo_invalid)  # type: ignore[arg-type]
     app.add_exception_handler(SettingValidationError, _bo_invalid)  # type: ignore[arg-type]
@@ -304,4 +314,63 @@ def telemetry_validate(ident: BoIdentity,
     """Schema gate: accepts only a well-formed ``bo.telemetry.v1`` event."""
     bo_identity.require(ident, "telemetry:read")
     get_adapter().validate_incoming(payload)
+    return {"ok": True}
+
+
+# --------------------------------------------------------------------------- #
+# Signed packages (VAL2-01) — import → verify → quarantine/draft
+# --------------------------------------------------------------------------- #
+
+class _PackageImport(BaseModel):
+    source_dir: str = Field(min_length=1, max_length=1024)
+
+
+class _ApprovalCreate(BaseModel):
+    package_id: str = Field(min_length=1, max_length=64)
+    from_version: str = Field(min_length=1, max_length=64)
+    to_version: str = Field(min_length=1, max_length=64)
+    artifact_set_digest: str = Field(min_length=7, max_length=80)
+    expires_at: str = Field(min_length=10, max_length=64)
+
+
+@router.get("/packages")
+def list_packages(ident: BoIdentity) -> Any:
+    return {"imports": pkg_service.list_imports(ident)}
+
+
+@router.post("/packages/import")
+def import_package(body: _PackageImport, ident: BoIdentity) -> Any:
+    """Verify a server-local package dir and quarantine it. The response always
+    carries the verifier verdict; rejected imports are persisted as REJECTED."""
+    return pkg_service.import_package(ident, Path(body.source_dir))
+
+
+@router.get("/packages/{import_id}")
+def get_package_import(import_id: str, ident: BoIdentity) -> Any:
+    return pkg_service.get_import(ident, import_id)
+
+
+@router.post("/packages/{import_id}/promote")
+def promote_package(import_id: str, ident: BoIdentity) -> Any:
+    """QUARANTINED → DRAFT after re-verifying the stored copy."""
+    return pkg_service.promote_to_draft(ident, import_id)
+
+
+@router.get("/packages-approvals")
+def list_package_approvals(ident: BoIdentity) -> Any:
+    return {"approvals": pkg_service.list_approvals(ident)}
+
+
+@router.post("/packages-approvals", status_code=201)
+def create_package_approval(body: _ApprovalCreate, ident: BoIdentity) -> Any:
+    return pkg_service.create_approval(
+        ident, package_id=body.package_id, from_version=body.from_version,
+        to_version=body.to_version,
+        artifact_set_digest_value=body.artifact_set_digest,
+        expires_at=body.expires_at)
+
+
+@router.post("/packages-approvals/{approval_id}/revoke")
+def revoke_package_approval(approval_id: str, ident: BoIdentity) -> Any:
+    pkg_service.revoke_approval(ident, approval_id)
     return {"ok": True}

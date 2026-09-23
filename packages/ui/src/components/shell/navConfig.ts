@@ -222,6 +222,13 @@ export const ADVANCED_ITEMS: NavItem[] = [
     description:
       "Automatizări deterministe BOAgents — ciorne, versiuni și simulări fără efecte externe.",
   },
+  {
+    href: "/bo/packages",
+    label: "BOAgents — Pachete",
+    icon: "bolt",
+    description:
+      "Pachete semnate bo.package.v1 — import verificat, carantină și aprobări de downgrade.",
+  },
 ];
 
 // Anchors the mobile bottom nav. ≤5 per Material guidance; "More" opens

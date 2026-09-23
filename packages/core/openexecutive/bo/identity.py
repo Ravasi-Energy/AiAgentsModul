@@ -46,6 +46,8 @@ _CAP_MIN_ROLE: dict[str, Role] = {
     "bots:write": "admin",
     "bots:simulate": "operator",
     "telemetry:read": "viewer",
+    "packages:read": "viewer",
+    "packages:write": "admin",
 }
 
 
