@@ -100,6 +100,43 @@ Comparate: clasificarea, `manifestDigest`, `artifactSetDigest`,
 - `reasons[0]` poartă `"CODE: detaliu"` — consumatorii compară codul, nu
   detaliul.
 
+## INT-201-06 — înghețarea artefactului comun
+
+Versiunea curentă a `coordonare/contracte/bo.package.v1/` este **înghețată**
+ca referință pentru consumatori (A02/A03). Nicio schimbare de contract
+necoordonată.
+
+**Amprentă (SHA256 peste `SHA256SUMS`):**
+`02571944523f2e41f31f61829fd59bd771f053500b82ba9df8048dddacf92d99`
+— identică cu cea verificată independent în review-ul de remedieri.
+
+**Inventar:**
+
+| Componentă | Conținut |
+|---|---|
+| `CONTRACT-bo.package.v1.md` | contractul complet (manifest, verificare, verdict, aprobări, coduri) |
+| `bo.package.v1.schema.json` | schemă manifest — SHA256 `f070e838…95e13` (identică în toate cele 3 produse) |
+| `bo.package.verdict.v1.schema.json` | schemă verdict `bo.package.verdict.v1` (mulțime închisă) |
+| `BO-C14N-v1.md` | specificația canonicalizării |
+| `registry.example.json` + `keys.json` | registru exemplu + chei Ed25519 sintetice |
+| `fixtures/packages/` | **29 cazuri** — 4 ACCEPT (`valid-bobot`, `nested-manifest-signed`, `rollback-approved`, `idempotent-reimport`) + 25 REJECT |
+| `fixtures/expected.json` | verdict complet de referință (`verdict_doc`) + context per caz |
+| `vectors/` | **26 vectori canonici** `.canonical.bin` + `digests.json` |
+| `regen.py` | regenerare deterministă din runtime A01 + auto-verificare clasificare |
+| `interop/check_verifier.py` | probă cross-implementare (A01×A02: 0 divergențe) |
+| `SHA256SUMS`, `MANIFEST.json`, `CHANGELOG.md`, `README.md` | integritate, amprentă, istoric, consum |
+
+Coduri de respingere acoperite: `ARTIFACT_MISSING`, `ARTIFACT_MODIFIED`,
+`BAD_SIGNATURE`, `CAPABILITY_EXCESSIVE`, `CAPABILITY_UNKNOWN`,
+`DUPLICATE_KEY`, `INCOMPATIBLE`, `INVALID_MANIFEST`, `KEY_EXPIRED`,
+`KEY_REVOKED`, `KEY_UNKNOWN`, `KIND_NOT_ALLOWED`, `MANIFEST_TOO_LARGE`,
+`PUBLISHER_SUSPENDED`, `PUBLISHER_UNKNOWN`, `ROLLBACK_UNAUTHORIZED`,
+`TRAVERSAL`, `UNSIGNED_ARTIFACT`, `VERSION_CONFLICT`.
+
+Notă: copiile artefactului din Guardian/Hire aveau 24 cazuri la review;
+consumul versiunii înghețate (29) aparține A02/A03 — eu nu modific
+checkout-urile lor.
+
 ## Artefacte
 
 - Bundle: `agenti/BO-A01/bo-a01-val2-01.bundle` _(SHA256 în MANIFEST-VAL2-01.json)_
@@ -107,3 +144,4 @@ Comparate: clasificarea, `manifestDigest`, `artifactSetDigest`,
   `02571944523f2e41f31f61829fd59bd771f053500b82ba9df8048dddacf92d99`
 - Probe: `rapoarte/BO-A01/VAL2-01/probe-ui/`
 - Contract comun: `coordonare/contracte/bo.package.v1/`
+- Predare canonică: `coordonare/rapoarte/BO-A01/VAL2-01/PREDARE.md`
