@@ -863,6 +863,11 @@ class TestExecutionEvents:
                 tenant=TENANT, kind="receipt",
                 body={"payload": "secret material"},
             )
+        digest_env = serialize.build_execution_event(
+            tenant=TENANT, kind="receipt",
+            body={"payloadDigest": "sha256:abc"},
+        )
+        serialize.validate_execution_event(digest_env)
         with pytest.raises(serialize.ExecutionEventError):
             serialize.build_execution_event(
                 tenant=TENANT, kind="bogus", body={},

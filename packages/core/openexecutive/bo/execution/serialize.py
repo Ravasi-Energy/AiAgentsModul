@@ -61,10 +61,14 @@ def build_execution_event(
 def _assert_minimized(body: dict[str, Any]) -> None:
     """Fail closed on sensitive fields — execution events carry refs and
     digests, never payloads, secrets, principals or prompt content."""
-    forbidden = {"payload", "secret", "token", "email", "prompt", "principal"}
+    forbidden = {"secret", "token", "email", "prompt", "principal"}
     for key in body:
         lowered = key.lower()
         if any(bad in lowered for bad in forbidden):
+            raise ExecutionEventError(
+                f"câmp minimizat refuzat pe fir: {key}"
+            )
+        if "payload" in lowered and "digest" not in lowered and "hash" not in lowered:
             raise ExecutionEventError(
                 f"câmp minimizat refuzat pe fir: {key}"
             )
