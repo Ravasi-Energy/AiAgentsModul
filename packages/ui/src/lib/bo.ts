@@ -428,8 +428,10 @@ export interface BoRouteObservation {
       score: number | null;
     }[];
   };
-  delivered: boolean;
+  /** 0 = în așteptare, 1 = livrat, 2 = eșuat definitiv (cap de tentative). */
+  delivered: number;
   delivery_error: string | null;
+  event_id: string | null;
 }
 
 export interface BoRoutingStatus {
@@ -438,8 +440,19 @@ export interface BoRoutingStatus {
   catalog_version: string;
   total: number;
   pending_delivery: number;
+  dead_delivery: number;
   met_bar: number;
   last_at: string | null;
+  outbox_total: number;
+  outbox_pending: number;
+  outbox_dead: number;
+  outbox_attempts: number;
+  outbox_last_error: string | null;
+  delivery: {
+    interval_s: number;
+    batch_size: number;
+    max_attempts: number;
+  };
   note: string;
 }
 

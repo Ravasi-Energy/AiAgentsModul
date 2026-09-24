@@ -48,6 +48,15 @@ def audit(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
     return capture_audit(monkeypatch)
 
 
+@pytest.fixture(autouse=True)
+def _stop_delivery_worker():
+    """Never leak the background delivery thread across tests."""
+    yield
+    from openexecutive.bo.routing import delivery
+
+    delivery.stop_worker()
+
+
 def _entry(
     *,
     entry_id: str = "c1",
@@ -348,8 +357,10 @@ class TestObserve:
         assert row["met_bar"] is True
         assert row["measured"]["inputTokens"] == 1000
         assert row["billed"]["evidenceRef"] == "provider:usage.cost"
-        # Telemetry disabled by default → persisted but undelivered.
-        assert row["delivered"] is False
+        # Telemetry disabled by default → persisted but undelivered (0).
+        assert row["delivered"] == 0
+        # REM-01: the stable eventId is persisted with the envelope.
+        assert row["event_id"] and row["event_id"].startswith("evt_")
 
     def test_actual_route_unchanged_regardless_of_recommendation(
         self, db: Path, monkeypatch: pytest.MonkeyPatch
@@ -382,30 +393,304 @@ class TestObserve:
             def send(self, event: dict) -> None:
                 raise ConnectionError("guardian down")
 
+        # The hook itself performs NO send — the row is persisted pending.
         monkeypatch.setattr(
             tel, "_adapter", tel.TelemetryAdapter(enabled=True, transport=Down())
         )
         observe.observe_call(
             model="claude-x", actor="specialist", counts=None)
         row = store.list_observations(TENANT)[0]
-        assert row["delivered"] is False
+        assert row["delivered"] == 0
+
+        # First delivery attempt fails → error recorded, still pending.
+        res = observe.flush_pending(TENANT)
+        assert res["sent"] == 0 and res["failed"] == 1
+        row = store.list_observations(TENANT)[0]
+        assert row["delivered"] == 0
         assert "guardian down" in (row["delivery_error"] or "")
 
         sent: list[dict] = []
 
         class Up:
-            def send(self, event: dict) -> None:
+            def send(self, event: dict) -> dict:
                 sent.append(event)
+                return {"status": "RECEIVED"}
 
         monkeypatch.setattr(
             tel, "_adapter", tel.TelemetryAdapter(enabled=True, transport=Up())
         )
         res = observe.flush_pending(TENANT)
-        assert res == {"sent": 1, "failed": 0}
+        assert res["sent"] == 1 and res["failed"] == 0
         assert sent and sent[0]["schemaVersion"] == "bo.model-observation.v1"
         assert sent[0]["product"] == "BOAgents"
         assert sent[0]["tenantRef"] == TENANT
-        assert store.list_observations(TENANT)[0]["delivered"] is True
+        assert store.list_observations(TENANT)[0]["delivered"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# REM-01 — durable outbox: stable identity at retry, leased concurrent
+# delivery, no network in the hook, dead-letter visibility
+# --------------------------------------------------------------------------- #
+
+class TestDeliveryOutbox:
+    def _enable(self, db: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("BO_TENANT_ID", TENANT)
+        settings_store.set_value(
+            TENANT, "bo.router.observe_enabled", True,
+            expected_version=0, actor="admin@t", db_path=db,
+        )
+
+    def _adapter(self, monkeypatch: pytest.MonkeyPatch, transport: Any):
+        from openexecutive.bo.telemetry import adapter as tel
+
+        ad = tel.TelemetryAdapter(enabled=True, transport=transport)
+        monkeypatch.setattr(tel, "_adapter", ad)
+        return ad
+
+    def test_hook_never_touches_network(
+        self, db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """REM-01/V3-R2: a transport that would block for the HTTP timeout is
+        never invoked inside observe_call — zero Guardian I/O in the hook."""
+        self._enable(db, monkeypatch)
+        calls: list[dict] = []
+
+        class SlowReceiver:
+            def send(self, event: dict) -> None:
+                calls.append(event)
+                import time
+
+                time.sleep(30)  # would blow up any synchronous call path
+
+        self._adapter(monkeypatch, SlowReceiver())
+        import time
+
+        t0 = time.monotonic()
+        out = observe.observe_call(
+            model="claude-x", actor="specialist", counts=None)
+        elapsed = time.monotonic() - t0
+        assert out is not None
+        assert calls == []          # transport never invoked by the hook
+        assert elapsed < 5          # no HTTP timeout leaks into the call path
+        row = store.list_observations(TENANT)[0]
+        assert row["delivered"] == 0
+
+    def test_ack_lost_retry_sends_identical_envelope(
+        self, db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """REM-01/V3-R1: receiver GOT the event but the ACK was lost — the
+        retry re-sends byte-identical bytes (same eventId), which is what
+        lets Guardian answer DUPLICATE instead of storing it twice."""
+        self._enable(db, monkeypatch)
+        received: list[str] = []
+
+        class AckLost:
+            def send(self, event: dict) -> None:
+                received.append(json.dumps(event, sort_keys=True))
+                raise TimeoutError("ack lost after write")
+
+        self._adapter(monkeypatch, AckLost())
+        observe.observe_call(model="m1", actor="specialist", counts=None)
+
+        res = observe.flush_pending(TENANT)
+        assert res["failed"] == 1 and received
+        assert store.list_observations(TENANT)[0]["delivered"] == 0
+
+        # Retry — identical bytes on the wire.
+        res = observe.flush_pending(TENANT)
+        assert res["failed"] == 1
+        assert len(received) == 2
+        assert received[0] == received[1]
+        assert json.loads(received[0])["eventId"] == \
+            store.list_observations(TENANT)[0]["event_id"]
+
+    def test_restart_preserves_envelope_identity(
+        self, db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Restart between receive and confirm: a NEW adapter instance must
+        re-send the persisted envelope unchanged — identity is read from the
+        outbox row, not regenerated."""
+        self._enable(db, monkeypatch)
+
+        class Down:
+            def send(self, event: dict) -> None:
+                raise ConnectionError("down")
+
+        self._adapter(monkeypatch, Down())
+        observe.observe_call(model="m1", actor="specialist", counts=None)
+        before = store.list_observations(TENANT)[0]["event_id"]
+        observe.flush_pending(TENANT)
+
+        sent: list[dict] = []
+
+        class Up:
+            def send(self, event: dict) -> dict:
+                sent.append(event)
+                return {"status": "RECEIVED"}
+
+        # Fresh adapter instance = "process restarted".
+        self._adapter(monkeypatch, Up())
+        res = observe.flush_pending(TENANT)
+        assert res["sent"] == 1
+        assert sent[0]["eventId"] == before
+
+    def test_new_observation_new_event_id(
+        self, db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A genuinely new emission gets a NEW eventId even when the body
+        looks identical — dedup never collapses real observations."""
+        self._enable(db, monkeypatch)
+        observe.observe_call(model="m", actor="specialist", counts=None)
+        observe.observe_call(model="m", actor="specialist", counts=None)
+        rows = store.list_observations(TENANT)
+        assert len(rows) == 2
+        assert rows[0]["event_id"] != rows[1]["event_id"]
+
+    def test_duplicate_ack_counts_as_delivered(
+        self, db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """RECEIVED/DUPLICATE both mean the receiver holds the event."""
+        self._enable(db, monkeypatch)
+
+        class DupAck:
+            def send(self, event: dict) -> dict:
+                return {"status": "DUPLICATE", "eventId": event["eventId"]}
+
+        self._adapter(monkeypatch, DupAck())
+        observe.observe_call(model="m", actor="specialist", counts=None)
+        res = observe.flush_pending(TENANT)
+        assert res["sent"] == 1 and res["failed"] == 0
+        assert store.list_observations(TENANT)[0]["delivered"] == 1
+
+    def test_concurrent_flush_no_duplicate_sends(
+        self, db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two flush workers racing on the same rows must not double-send:
+        the lease claim under BEGIN IMMEDIATE gives each row to one worker."""
+        import threading
+
+        self._enable(db, monkeypatch)
+        sent: list[str] = []
+        lock = threading.Lock()
+
+        class Up:
+            def send(self, event: dict) -> dict:
+                with lock:
+                    sent.append(event["eventId"])
+                return {"status": "RECEIVED"}
+
+        adapter = self._adapter(monkeypatch, Up())
+        for _ in range(6):
+            observe.observe_call(model="m", actor="specialist", counts=None)
+
+        results: list[dict] = []
+
+        def worker() -> None:
+            from openexecutive.bo.routing import delivery
+
+            results.append(delivery.deliver_pending(TENANT, adapter=adapter))
+
+        threads = [threading.Thread(target=worker) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert len(sent) == 6                      # every event sent
+        assert len(set(sent)) == 6                 # none sent twice
+        assert sum(r["sent"] for r in results) == 6
+        assert all(
+            o["delivered"] == 1 for o in store.list_observations(TENANT)
+        )
+
+    def test_attempt_cap_marks_dead_and_visible(
+        self, db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Past delivery_max_attempts the envelope is dead-lettered —
+        visible in status/UI, never silently dropped or retried forever."""
+        self._enable(db, monkeypatch)
+        settings_store.set_value(
+            TENANT, "bo.router.delivery_max_attempts", 2,
+            expected_version=0, actor="admin@t", db_path=db,
+        )
+
+        class Down:
+            def send(self, event: dict) -> None:
+                raise ConnectionError("still down")
+
+        self._adapter(monkeypatch, Down())
+        observe.observe_call(model="m", actor="specialist", counts=None)
+
+        for _ in range(3):
+            observe.flush_pending(TENANT)
+        row = store.list_observations(TENANT)[0]
+        assert row["delivered"] == 2
+        assert row["delivery_error"] == "attempt cap reached"
+        stats = store.observation_stats(TENANT)
+        assert stats["dead_delivery"] == 1
+        assert store.outbox_stats(TENANT)["outbox_dead"] == 1
+        # Dead rows are excluded from further claims.
+        res = observe.flush_pending(TENANT)
+        assert res["claimed"] == 0
+
+    def test_catalog_sync_persisted_and_retried(
+        self, db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Catalog sync goes through the same durable outbox — persisted
+        before send, retried identically, coalesced while pending."""
+        monkeypatch.setenv("BO_TENANT_ID", TENANT)
+        store.create_entry(TENANT, _fields(), actor="a@t", db_path=db)
+
+        class Down:
+            def send(self, event: dict) -> None:
+                raise ConnectionError("down")
+
+        self._adapter(monkeypatch, Down())
+        observe.emit_catalog_sync(TENANT, db_path=db)
+        observe.emit_catalog_sync(TENANT, db_path=db)   # coalesces
+        stats = store.outbox_stats(TENANT)
+        assert stats["outbox_pending"] == 1
+
+        sent: list[dict] = []
+
+        class Up:
+            def send(self, event: dict) -> dict:
+                sent.append(event)
+                return {"status": "RECEIVED"}
+
+        self._adapter(monkeypatch, Up())
+        res = observe.flush_pending(TENANT)
+        assert res["sent"] == 1
+        assert sent[0]["models"]
+        assert "routing" not in sent[0]
+
+    def test_outbox_tenant_isolation(
+        self, db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("BO_TENANT_ID", TENANT)
+        observe.emit_catalog_sync(TENANT, db_path=db)
+        observe.emit_catalog_sync("tenant-b", db_path=db)
+        stats_a = store.outbox_stats(TENANT)
+        stats_b = store.outbox_stats("tenant-b")
+        assert stats_a["outbox_pending"] == 1
+        assert stats_b["outbox_pending"] == 1
+        assert store.outbox_stats("tenant-c")["outbox_pending"] == 0
+
+    def test_disabled_adapter_keeps_pending(
+        self, db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Telemetry disabled → flush marks the attempt failed (visible),
+        envelope stays pending for a later retry."""
+        self._enable(db, monkeypatch)
+        from openexecutive.bo.telemetry import adapter as tel
+
+        monkeypatch.setattr(tel, "_adapter", tel.TelemetryAdapter(enabled=False))
+        observe.observe_call(model="m", actor="specialist", counts=None)
+        res = observe.flush_pending(TENANT)
+        assert res["sent"] == 0 and res["failed"] == 1
+        row = store.list_observations(TENANT)[0]
+        assert row["delivered"] == 0
+        assert row["delivery_error"] == "telemetry disabled"
 
     def test_retention_sweep(
         self, db: Path, monkeypatch: pytest.MonkeyPatch

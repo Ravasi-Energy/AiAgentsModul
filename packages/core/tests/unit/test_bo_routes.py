@@ -52,7 +52,7 @@ def test_settings_list_viewer_ok(client: TestClient) -> None:
     body = resp.json()
     assert body["tenant"] == "tenant-a"
     assert body["role"] == "viewer"
-    assert len(body["settings"]) == 17
+    assert len(body["settings"]) == 20
     assert all(s["origin"] == "default" for s in body["settings"])
 
 

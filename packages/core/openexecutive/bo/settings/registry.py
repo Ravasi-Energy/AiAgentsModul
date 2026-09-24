@@ -502,6 +502,66 @@ REGISTRY: dict[str, SettingSpec] = {
             v, minimum=1, maximum=3650, label="Retenția observațiilor"
         ),
     ),
+    "bo.router.delivery_interval_s": SettingSpec(
+        key="bo.router.delivery_interval_s",
+        type="integer",
+        default=30,
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="routing",
+        label_ro="Interval livrare telemetrie (s)",
+        label_en="Telemetry delivery interval (s)",
+        help_ro="Cât des golește workerul coada de livrare. 0 = doar flush manual; I/O Guardian nu ajunge niciodată în hookul de observare.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="La următorul tick al workerului; observațiile rămân persistate indiferent.",
+        acceptance_ro="0 dezactivează workerul; flush-ul manual rămâne funcțional.",
+        validate=lambda v: _validate_int(
+            v, minimum=0, maximum=3600, label="Intervalul de livrare"
+        ),
+    ),
+    "bo.router.delivery_batch_size": SettingSpec(
+        key="bo.router.delivery_batch_size",
+        type="integer",
+        default=50,
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="routing",
+        label_ro="Livrat per ciclu (evenimente)",
+        label_en="Delivery batch size",
+        help_ro="Câte plicuri se trimit într-un ciclu de livrare. Mărginește burst-ul spre Guardian.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Ciclurile următoare procesează cel mult această valoare.",
+        acceptance_ro="Limita se aplică la fiecare ciclu worker/flush.",
+        validate=lambda v: _validate_int(
+            v, minimum=1, maximum=500, label="Batch-ul de livrare"
+        ),
+    ),
+    "bo.router.delivery_max_attempts": SettingSpec(
+        key="bo.router.delivery_max_attempts",
+        type="integer",
+        default=25,
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="routing",
+        label_ro="Tentative maxime de livrare",
+        label_en="Max delivery attempts",
+        help_ro="Peste acest prag plicul e marcat eșuat definitiv (vizibil în stare), nu abandonat tăcut.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Plicurile peste prag devin eșuate definitive la următorul ciclu.",
+        acceptance_ro="Eșuările definitive apar în status/outbox, nu se pierd tăcut.",
+        validate=lambda v: _validate_int(
+            v, minimum=1, maximum=1000, label="Tentativele maxime"
+        ),
+    ),
 }
 
 

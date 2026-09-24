@@ -25,7 +25,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
-from openexecutive.bo.routing import engine, serialize, store
+from openexecutive.bo.routing import delivery, engine, serialize, store
 from openexecutive.bo.routing.engine import Policy, TaskContext
 
 logger = logging.getLogger(__name__)
@@ -205,6 +205,16 @@ def observe_call(
             measured=measured,
             billed=billed,
         )
+        # REM-01: the COMPLETE envelope (stable eventId + identity) is built
+        # and persisted BEFORE any send attempt — every retry re-sends these
+        # exact bytes, so a lost ACK deduplicates receiver-side by eventId.
+        # The hook itself performs ZERO network I/O: delivery is the bounded
+        # outbox mechanism in ``routing.delivery`` (worker or /flush).
+        from openexecutive.bo.telemetry.adapter import get_adapter
+
+        envelope = get_adapter().build_model_observation(
+            tenant=tenant, body=body, occurred_at=occurred_at
+        )
         obs_id = store.record_observation(
             tenant,
             {
@@ -225,29 +235,11 @@ def observe_call(
                 "detail": decision.to_dict(),
                 "event": body,
             },
+            envelope,
             db_path=db_path,
         )
 
-        # Deliver through the existing adapter — a lost receiver keeps the
-        # row (delivered=0) for flush_pending; never raised to the caller.
-        # ``None`` from emit means the adapter is disabled → dropped, not
-        # delivered.
-        try:
-            from openexecutive.bo.telemetry.adapter import get_adapter
-
-            sent = get_adapter().emit_model_observation(
-                tenant=tenant, body=body, occurred_at=occurred_at
-            )
-            store.mark_delivered(
-                tenant, obs_id,
-                error=None if sent is not None else "telemetry disabled",
-                db_path=db_path,
-            )
-        except Exception as exc:  # noqa: BLE001 — receiver may be down
-            store.mark_delivered(
-                tenant, obs_id, error=str(exc)[:200], db_path=db_path
-            )
-            logger.warning("observație de rutare nelivrată: %s", exc)
+        delivery.ensure_worker(db_path=db_path)
 
         retention = int(
             settings_store.get_effective_value(
@@ -262,34 +254,18 @@ def observe_call(
 
 
 def flush_pending(tenant: str, db_path: Path | None = None) -> dict[str, int]:
-    """Retry delivery of undelivered observations — the documented behaviour
-    for 'Guardian indisponibil': rows persist locally, retried on demand."""
-    from openexecutive.bo.telemetry.adapter import get_adapter
-
-    adapter = get_adapter()
-    sent = failed = 0
-    for row in store.undelivered(tenant, db_path=db_path):
-        try:
-            sent_doc = adapter.emit_model_observation(
-                tenant=tenant,
-                body=row["event"],
-                occurred_at=row["occurred_at"],
-            )
-            if sent_doc is None:
-                raise RuntimeError("telemetria este dezactivată")
-            store.mark_delivered(tenant, row["obs_id"], error=None, db_path=db_path)
-            sent += 1
-        except Exception as exc:  # noqa: BLE001
-            store.mark_delivered(
-                tenant, row["obs_id"], error=str(exc)[:200], db_path=db_path
-            )
-            failed += 1
-    return {"sent": sent, "failed": failed}
+    """Retry delivery of pending envelopes — the documented behaviour for
+    'Guardian indisponibil': rows persist locally with their stable eventId
+    and are re-sent byte-identically, so a retry after a lost ACK arrives as
+    a DUPLICATE, never as a second logical observation."""
+    return delivery.deliver_pending(tenant, db_path=db_path)
 
 
 def emit_catalog_sync(tenant: str, db_path: Path | None = None) -> None:
-    """Emit a ``models[]`` inventory event on catalog writes (best effort —
-    a failed send never blocks the catalog write itself)."""
+    """Queue a ``models[]`` inventory event on catalog writes (REM-01: the
+    sync is persisted + retried through the same outbox, never inline I/O
+    and never blocking the catalog write). Same sync tag while still pending
+    coalesces — no duplicate queue buildup."""
     from openexecutive.bo.telemetry.adapter import get_adapter
 
     try:
@@ -301,8 +277,15 @@ def emit_catalog_sync(tenant: str, db_path: Path | None = None) -> None:
             sync_id=f"sync_{store.catalog_version(tenant, db_path=db_path)}",
             complete=True,
         )
-        get_adapter().emit_model_observation(tenant=tenant, body=body)
-    except Exception:  # noqa: BLE001 — inventory sync is best-effort
+        envelope = get_adapter().build_model_observation(
+            tenant=tenant, body=body
+        )
+        store.enqueue_outbox(
+            tenant, "models", f"sync_{store.catalog_version(tenant, db_path=db_path)}",
+            envelope, db_path=db_path,
+        )
+        delivery.ensure_worker(db_path=db_path)
+    except Exception:  # noqa: BLE001 — inventory sync never blocks the write
         logger.warning("emit_catalog_sync a eșuat", exc_info=True)
 
 

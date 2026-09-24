@@ -4118,10 +4118,19 @@ bo:
     score desc → cost asc → identity asc tie-break), and durable
     observations. observe.py hooks audit.usage.log_model_usage post-call:
     computes the recommendation vs the model actually used, persists both
-    separately, then emits bo.model-observation.v1 through the telemetry
-    adapter. It NEVER changes the route, never blocks, never calls a
-    provider, and never raises into the call path; with
-    bo.router.observe_enabled=false (default) it is a no-op. Undelivered
-    observations stay local (delivered=0) until POST /bo/routing/flush or
-    receiver recovery. bo.bots imports nothing from bo.routing — BoBots keep
-    zero LLM dependency.
+    separately, then hands off — the hook performs ZERO network I/O
+    (REM-01). The complete bo.model-observation.v1 envelope (stable eventId
+    + server-derived identity) is stored in bo_telemetry_outbox BEFORE the
+    first send attempt and re-sent byte-identically on every retry, so a
+    lost ACK surfaces receiver-side as DUPLICATE, never as a second logical
+    observation. Delivery is a bounded, administrable mechanism
+    (routing/delivery.py): leased claims under BEGIN IMMEDIATE make
+    concurrent flushes race-safe, bo.router.delivery_batch_size /
+    delivery_interval_s / delivery_max_attempts bound it, envelopes past the
+    cap are dead-lettered (delivered=2, visible in status/UI), and catalog
+    syncs share the same outbox. A daemon worker drains it every
+    delivery_interval_s seconds (0 = POST /bo/routing/flush only). It NEVER
+    changes the route, never blocks, never calls a provider, and never
+    raises into the call path; with bo.router.observe_enabled=false
+    (default) it is a no-op. bo.bots imports nothing from bo.routing —
+    BoBots keep zero LLM dependency.

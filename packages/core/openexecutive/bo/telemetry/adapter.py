@@ -39,15 +39,20 @@ def opaque_actor_ref(actor: str) -> str:
     return f"actor_{digest}"
 
 
+class TelemetryDisabledError(RuntimeError):
+    """Raised by ``deliver_event`` when the adapter is disabled — the
+    envelope stays pending in the outbox for a later flush."""
+
+
 class Transport(Protocol):
-    def send(self, event: dict[str, Any]) -> None: ...
+    def send(self, event: dict[str, Any]) -> dict[str, Any] | None: ...
 
 
 class NullTransport:
     """Accepts and discards — used when telemetry is enabled-but-unrouted."""
 
-    def send(self, event: dict[str, Any]) -> None:  # noqa: ARG002
-        return
+    def send(self, event: dict[str, Any]) -> dict[str, Any] | None:  # noqa: ARG002
+        return None
 
 
 class BufferedTransport:
@@ -57,10 +62,11 @@ class BufferedTransport:
         self.capacity = capacity
         self.events: list[dict[str, Any]] = []
 
-    def send(self, event: dict[str, Any]) -> None:
+    def send(self, event: dict[str, Any]) -> dict[str, Any] | None:
         self.events.append(event)
         if len(self.events) > self.capacity:
             del self.events[: len(self.events) - self.capacity]
+        return {"status": "RECEIVED", "eventId": event.get("eventId")}
 
 
 class HttpTransport:
@@ -69,6 +75,11 @@ class HttpTransport:
     Exists for contract completeness; it is *never* instantiated unless an
     operator explicitly configures ``BO_TELEMETRY_TRANSPORT=http`` together
     with endpoint + token. Tests use BufferedTransport.
+
+    Returns the receiver's parsed JSON acknowledgement (e.g.
+    ``{"status": "RECEIVED"|"DUPLICATE", "eventId": …}``) or ``None`` when
+    the receiver answered 2xx with an empty/non-JSON body. HTTP and network
+    failures raise — the caller decides retry semantics.
     """
 
     def __init__(self, endpoint: str, token: str, timeout_s: float = 5.0) -> None:
@@ -76,7 +87,7 @@ class HttpTransport:
         self.token = token
         self.timeout_s = timeout_s
 
-    def send(self, event: dict[str, Any]) -> None:
+    def send(self, event: dict[str, Any]) -> dict[str, Any] | None:
         import urllib.request
 
         req = urllib.request.Request(
@@ -88,7 +99,12 @@ class HttpTransport:
             },
             method="POST",
         )
-        urllib.request.urlopen(req, timeout=self.timeout_s).read()  # noqa: S310
+        raw = urllib.request.urlopen(req, timeout=self.timeout_s).read()  # noqa: S310
+        try:
+            ack = json.loads(raw)
+        except ValueError:
+            return None
+        return ack if isinstance(ack, dict) else None
 
 
 class TelemetryAdapter:
@@ -161,6 +177,51 @@ class TelemetryAdapter:
         """Strictly validate an externally-supplied event (fixture endpoint)."""
         return schema.validate_event(event)
 
+    def build_model_observation(
+        self,
+        *,
+        tenant: str,
+        body: dict[str, Any],
+        occurred_at: str | None = None,
+        event_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Assemble a complete ``bo.model-observation.v1`` envelope WITHOUT
+        sending it (REM-01): the caller persists the returned document and
+        hands the exact same bytes to every retry, so a lost ACK retries the
+        same ``eventId`` — which is what lets Guardian deduplicate.
+
+        ``event_id`` is only set by the delivery path re-stamping nothing —
+        pass ``None`` for a genuinely new emission (new id, new envelope).
+        Envelope identity is server-derived; never trusted from ``body``.
+        """
+        return {
+            "schemaVersion": "bo.model-observation.v1",
+            "eventId": event_id or f"evt_{uuid.uuid4().hex[:24]}",
+            "producerId": self.producer_id,
+            "product": _PRODUCT,
+            "installationId": self.installation_id,
+            "tenantRef": tenant,
+            "observedAt": occurred_at
+            or datetime.now(UTC)
+            .isoformat(timespec="milliseconds")
+            .replace("+00:00", "Z"),
+            **body,
+        }
+
+    def deliver_event(self, event: dict[str, Any]) -> dict[str, Any] | None:
+        """Send an already-built envelope through the configured transport.
+
+        Returns the receiver ack (``RECEIVED``/``DUPLICATE`` both mean the
+        receiver holds the event). Raises ``TelemetryDisabledError`` when the
+        adapter is disabled — the caller must keep the envelope pending.
+        """
+        if not self.enabled:
+            self.dropped += 1
+            raise TelemetryDisabledError("telemetria este dezactivată")
+        ack = self.transport.send(event)
+        self.emitted += 1
+        return ack
+
     def emit_model_observation(
         self,
         *,
@@ -174,23 +235,16 @@ class TelemetryAdapter:
         only the body members (``models`` and/or ``routing``); envelope fields
         are server-derived. Disabled adapter → dropped before the document is
         even assembled for the wire (``self.dropped`` counts it).
+
+        One-shot convenience for fixture/probe drivers — the product's durable
+        path is ``build_model_observation`` + outbox + ``deliver_event``.
         """
         if not self.enabled:
             self.dropped += 1
             return None
-        event = {
-            "schemaVersion": "bo.model-observation.v1",
-            "eventId": f"evt_{uuid.uuid4().hex[:24]}",
-            "producerId": self.producer_id,
-            "product": _PRODUCT,
-            "installationId": self.installation_id,
-            "tenantRef": tenant,
-            "observedAt": occurred_at
-            or datetime.now(UTC)
-            .isoformat(timespec="milliseconds")
-            .replace("+00:00", "Z"),
-            **body,
-        }
+        event = self.build_model_observation(
+            tenant=tenant, body=body, occurred_at=occurred_at
+        )
         self.transport.send(event)
         self.emitted += 1
         return event

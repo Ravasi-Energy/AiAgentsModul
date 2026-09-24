@@ -439,7 +439,12 @@ function ObservationDetail({ obs }: { obs: BoRouteObservation }) {
       <p style={{ marginTop: 8, fontSize: 12, opacity: 0.7 }}>
         policy {obs.policy_version} · catalog {obs.catalog_version} · corelare{" "}
         {obs.correlation_id} · livrare{" "}
-        {obs.delivered ? "efectuată" : `în așteptare${obs.delivery_error ? ` (${obs.delivery_error})` : ""}`}
+        {obs.delivered === 1
+          ? "efectuată"
+          : obs.delivered === 2
+            ? `eșuată definitiv${obs.delivery_error ? ` (${obs.delivery_error})` : ""}`
+            : `în așteptare${obs.delivery_error ? ` (${obs.delivery_error})` : ""}`}
+        {obs.event_id ? ` · ${obs.event_id}` : ""}
       </p>
     </div>
   );
@@ -571,6 +576,9 @@ export default function BoRoutingPage() {
             · catalog {status.catalog_version} · {status.total} observații
             {status.pending_delivery
               ? ` · ${status.pending_delivery} nelivrate`
+              : ""}
+            {status.dead_delivery
+              ? ` · ${status.dead_delivery} eșuate definitiv`
               : ""}
           </div>
           {canWrite ? (
@@ -757,8 +765,10 @@ export default function BoRoutingPage() {
                         </Pill>
                       </td>
                       <td>
-                        {o.delivered ? (
+                        {o.delivered === 1 ? (
                           <Pill kind="ok">livrat</Pill>
+                        ) : o.delivered === 2 ? (
+                          <Pill kind="danger" icon="alert">eșuat</Pill>
                         ) : (
                           <Pill kind="warn" icon="clock">în așteptare</Pill>
                         )}

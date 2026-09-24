@@ -496,8 +496,21 @@ def routing_status(ident: BoIdentity) -> Any:
         "mode": "observare",
         "catalog_version": f"cat_v{routing_store.catalog_version(ident.tenant)}",
         **routing_store.observation_stats(ident.tenant),
+        **routing_store.outbox_stats(ident.tenant),
+        "delivery": {
+            "interval_s": settings_store.get_effective_value(
+                ident.tenant, "bo.router.delivery_interval_s"
+            ),
+            "batch_size": settings_store.get_effective_value(
+                ident.tenant, "bo.router.delivery_batch_size"
+            ),
+            "max_attempts": settings_store.get_effective_value(
+                ident.tenant, "bo.router.delivery_max_attempts"
+            ),
+        },
         "note": "Routerul este strict în mod observare: nu schimbă modelul "
-                "folosit și nu blochează execuția.",
+                "folosit și nu blochează execuția. Livrarea telemetriei e "
+                "asincronă (outbox persistent), separată de hook.",
     }
 
 

@@ -13,6 +13,7 @@ Two tenants of truth, deliberately separate:
 from __future__ import annotations
 
 import json
+import sqlite3
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -108,6 +109,51 @@ def initialize_db(db_path: Path | None = None) -> None:
             "CREATE INDEX IF NOT EXISTS bo_route_obs_tenant_time "
             "ON bo_route_observations (tenant, occurred_at)"
         )
+        # REM-01: durable outbox — the COMPLETE bo.model-observation.v1
+        # envelope (eventId + identity + body) is persisted BEFORE the first
+        # send attempt and re-sent byte-identically on every retry, so a
+        # lost ACK deduplicates on the receiver side by eventId.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS bo_telemetry_outbox (
+                event_id     TEXT NOT NULL,
+                tenant       TEXT NOT NULL,
+                kind         TEXT NOT NULL,
+                ref_id       TEXT,
+                envelope     TEXT NOT NULL,
+                created_at   TEXT NOT NULL,
+                attempts     INTEGER NOT NULL DEFAULT 0,
+                delivered    INTEGER NOT NULL DEFAULT 0,
+                last_error   TEXT,
+                lease_owner  TEXT,
+                lease_until  TEXT,
+                PRIMARY KEY (tenant, event_id)
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS bo_outbox_pending "
+            "ON bo_telemetry_outbox (tenant, delivered, lease_until)"
+        )
+        # Catalog sync coalescing: at most one PENDING models-sync per
+        # (tenant, ref_id) — a catalog that changes twice before delivery
+        # produces one pending event per sync tag, not a queue buildup.
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS bo_outbox_pending_ref "
+            "ON bo_telemetry_outbox (tenant, kind, ref_id) WHERE delivered = 0"
+        )
+        # Migration: observations recorded before REM-01 lack event_id.
+        cols = {
+            r["name"]
+            for r in conn.execute(
+                "PRAGMA table_info(bo_route_observations)"
+            ).fetchall()
+        }
+        if "event_id" not in cols:
+            conn.execute(
+                "ALTER TABLE bo_route_observations "
+                "ADD COLUMN event_id TEXT"
+            )
 
 
 # --------------------------------------------------------------------------- #
@@ -323,20 +369,25 @@ def update_entry(
 def record_observation(
     tenant: str,
     obs: dict[str, Any],
+    envelope: dict[str, Any],
     *,
     db_path: Path | None = None,
 ) -> str:
-    """Persist one observation row durably (delivered=0 until emit succeeds)."""
+    """Persist one observation row AND its complete telemetry envelope
+    atomically — BEFORE any send attempt (REM-01). The persisted envelope,
+    including its ``eventId``, is what every retry re-sends unchanged."""
     obs_id = f"obs_{uuid.uuid4().hex[:20]}"
     with get_conn(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
         conn.execute(
             """
             INSERT INTO bo_route_observations (
                 obs_id, tenant, occurred_at, correlation_id, task_kind,
                 actor_ref, policy_version, catalog_version, decision,
                 met_bar, reasons_json, recommendation, actual_route,
-                cost_estimate, measured, billed, detail_json, event_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                cost_estimate, measured, billed, detail_json, event_json,
+                event_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 obs_id, tenant, obs["occurred_at"], obs["correlation_id"],
@@ -360,29 +411,172 @@ def record_observation(
                 else None,
                 json.dumps(obs["detail"]),
                 json.dumps(obs["event"]),
+                envelope["eventId"],
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO bo_telemetry_outbox (
+                event_id, tenant, kind, ref_id, envelope, created_at
+            ) VALUES (?, ?, 'routing', ?, ?, ?)
+            """,
+            (
+                envelope["eventId"], tenant, obs_id,
+                json.dumps(envelope), obs["occurred_at"],
             ),
         )
     return obs_id
 
 
-def mark_delivered(
+# --------------------------------------------------------------------------- #
+# Telemetry outbox — durable, leased, retryable delivery queue
+# --------------------------------------------------------------------------- #
+
+def enqueue_outbox(
     tenant: str,
-    obs_id: str,
+    kind: str,
+    ref_id: str | None,
+    envelope: dict[str, Any],
     *,
+    db_path: Path | None = None,
+) -> bool:
+    """Queue an envelope for delivery. Returns False when an identical
+    pending (tenant, kind, ref_id) row already exists — catalog syncs for
+    the same catalog version coalesce instead of queueing up."""
+    try:
+        with get_conn(db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO bo_telemetry_outbox (
+                    event_id, tenant, kind, ref_id, envelope, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    envelope["eventId"], tenant, kind, ref_id,
+                    json.dumps(envelope), _now(),
+                ),
+            )
+    except sqlite3.IntegrityError:
+        return False
+    return True
+
+
+def claim_outbox(
+    tenant: str,
+    *,
+    worker_id: str,
+    limit: int,
+    lease_s: int,
+    db_path: Path | None = None,
+) -> list[dict[str, Any]]:
+    """Atomically lease up to ``limit`` pending envelopes for this worker.
+
+    ``BEGIN IMMEDIATE`` makes the claim race-safe across threads AND
+    processes: a second flush sees either rows already leased (skipped) or
+    rows whose lease expired (crash between receive and confirm)."""
+    now = _now()
+    until = (datetime.now(UTC) + timedelta(seconds=lease_s)).isoformat(
+        timespec="milliseconds"
+    ).replace("+00:00", "Z")
+    with get_conn(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        rows = conn.execute(
+            """
+            SELECT event_id, kind, ref_id, envelope, attempts
+            FROM bo_telemetry_outbox
+            WHERE tenant = ? AND delivered = 0
+              AND (lease_until IS NULL OR lease_until < ?)
+            ORDER BY created_at LIMIT ?
+            """,
+            (tenant, now, limit),
+        ).fetchall()
+        for row in rows:
+            conn.execute(
+                "UPDATE bo_telemetry_outbox SET lease_owner = ?, "
+                "lease_until = ?, attempts = attempts + 1 "
+                "WHERE tenant = ? AND event_id = ?",
+                (worker_id, until, tenant, row["event_id"]),
+            )
+    return [
+        {
+            "event_id": r["event_id"],
+            "kind": r["kind"],
+            "ref_id": r["ref_id"],
+            "envelope": json.loads(r["envelope"]),
+            "attempts": int(r["attempts"]) + 1,
+        }
+        for r in rows
+    ]
+
+
+def resolve_outbox(
+    tenant: str,
+    event_id: str,
+    *,
+    kind: str | None = None,
+    ref_id: str | None = None,
     error: str | None,
+    dead: bool = False,
     db_path: Path | None = None,
 ) -> None:
+    """Record the delivery outcome and release the lease. ``dead`` marks a
+    permanently failed envelope (attempt cap reached) — visible, never
+    silently dropped. Routing observations mirror the outcome."""
+    delivered = 2 if dead else (0 if error else 1)
     with get_conn(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
         conn.execute(
-            "UPDATE bo_route_observations SET delivered = ?, delivery_error = ? "
-            "WHERE tenant = ? AND obs_id = ?",
-            (0 if error else 1, error, tenant, obs_id),
+            "UPDATE bo_telemetry_outbox SET delivered = ?, last_error = ?, "
+            "lease_owner = NULL, lease_until = NULL "
+            "WHERE tenant = ? AND event_id = ?",
+            (delivered, error, tenant, event_id),
         )
+        if kind == "routing" and ref_id is not None:
+            conn.execute(
+                "UPDATE bo_route_observations SET delivered = ?, "
+                "delivery_error = ? WHERE tenant = ? AND obs_id = ?",
+                (delivered, error, tenant, ref_id),
+            )
+
+
+def outbox_stats(tenant: str, db_path: Path | None = None) -> dict[str, Any]:
+    with get_conn(db_path) as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS total, "
+            "SUM(CASE WHEN delivered = 0 THEN 1 ELSE 0 END) AS pending, "
+            "SUM(CASE WHEN delivered = 2 THEN 1 ELSE 0 END) AS dead, "
+            "SUM(attempts) AS attempts "
+            "FROM bo_telemetry_outbox WHERE tenant = ?",
+            (tenant,),
+        ).fetchone()
+        last = conn.execute(
+            "SELECT last_error FROM bo_telemetry_outbox WHERE tenant = ? "
+            "AND last_error IS NOT NULL ORDER BY created_at DESC LIMIT 1",
+            (tenant,),
+        ).fetchone()
+    return {
+        "outbox_total": int(row["total"] or 0),
+        "outbox_pending": int(row["pending"] or 0),
+        "outbox_dead": int(row["dead"] or 0),
+        "outbox_attempts": int(row["attempts"] or 0),
+        "outbox_last_error": last["last_error"] if last else None,
+    }
+
+
+def outbox_tenants(db_path: Path | None = None) -> list[str]:
+    """Tenants with pending outbox rows — what the delivery worker drains."""
+    with get_conn(db_path) as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT tenant FROM bo_telemetry_outbox "
+            "WHERE delivered = 0"
+        ).fetchall()
+    return [r["tenant"] for r in rows]
 
 
 def _obs_from_row(row: Any) -> dict[str, Any]:
     return {
         "obs_id": row["obs_id"],
+        "event_id": row["event_id"],
         "occurred_at": row["occurred_at"],
         "correlation_id": row["correlation_id"],
         "task_kind": row["task_kind"],
@@ -407,7 +601,8 @@ def _obs_from_row(row: Any) -> dict[str, Any]:
         "billed": json.loads(row["billed"]) if row["billed"] is not None else None,
         "detail": json.loads(row["detail_json"]),
         "event": json.loads(row["event_json"]),
-        "delivered": bool(row["delivered"]),
+        # 0 = în așteptare, 1 = livrat, 2 = eșuat definitiv (cap de tentative)
+        "delivered": int(row["delivered"]),
         "delivery_error": row["delivery_error"],
     }
 
@@ -452,18 +647,6 @@ def get_observation(
     return _obs_from_row(row)
 
 
-def undelivered(
-    tenant: str, db_path: Path | None = None
-) -> list[dict[str, Any]]:
-    with get_conn(db_path) as conn:
-        rows = conn.execute(
-            "SELECT * FROM bo_route_observations WHERE tenant = ? "
-            "AND delivered = 0 ORDER BY occurred_at",
-            (tenant,),
-        ).fetchall()
-    return [_obs_from_row(r) for r in rows]
-
-
 def sweep_observations(
     tenant: str, retention_days: int, db_path: Path | None = None
 ) -> int:
@@ -488,6 +671,7 @@ def observation_stats(
         row = conn.execute(
             "SELECT COUNT(*) AS total, "
             "SUM(CASE WHEN delivered = 0 THEN 1 ELSE 0 END) AS pending, "
+            "SUM(CASE WHEN delivered = 2 THEN 1 ELSE 0 END) AS dead, "
             "SUM(CASE WHEN met_bar = 1 THEN 1 ELSE 0 END) AS met, "
             "MAX(occurred_at) AS last_at "
             "FROM bo_route_observations WHERE tenant = ?",
@@ -496,6 +680,7 @@ def observation_stats(
     return {
         "total": int(row["total"] or 0),
         "pending_delivery": int(row["pending"] or 0),
+        "dead_delivery": int(row["dead"] or 0),
         "met_bar": int(row["met"] or 0),
         "last_at": row["last_at"],
     }
@@ -511,12 +696,15 @@ __all__ = [
     "get_entry",
     "get_observation",
     "initialize_db",
+    "claim_outbox",
+    "enqueue_outbox",
     "list_catalog",
     "list_observations",
-    "mark_delivered",
     "observation_stats",
+    "outbox_stats",
+    "outbox_tenants",
     "record_observation",
+    "resolve_outbox",
     "sweep_observations",
-    "undelivered",
     "update_entry",
 ]
