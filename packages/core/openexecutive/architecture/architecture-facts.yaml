@@ -4095,3 +4095,42 @@ trust_ledger: |
   Current class: meeting_scheduling (calendar booking).
   AuthorityScope.MEETING_SCHEDULING added to people/models.py.
   Department: operations (default; changeable per org structure).
+
+bo:
+  slice: |
+    The BOAgents product surface under openexecutive.bo — own SQLite DB
+    (bo_agents.db, BOAGENTS_DB_PATH), tenant from BO_TENANT_ID server config,
+    roles viewer < operator < admin (BO_ADMIN_EMAILS). Settings live in
+    bo/settings/registry.py as typed contracts with CAS writes; BoBots are a
+    closed deterministic grammar with dry-run simulation only; the telemetry
+    adapter is disabled by default and stamps identity at emission.
+  packages: |
+    bo/packages implements bo.package.v1: canonicalization (BO-C14N-v1),
+    Ed25519 signature verify against the tenant trust store, import →
+    quarantine → draft lifecycle with rollback approvals. No activation path
+    exists — packages never produce external effects.
+  routing_observe: |
+    bo/routing (VAL3-01) is the observe-mode model router: an administered
+    catalog (provider/model/version, capabilities, regions, cost and quality
+    evidence — decimal-string money, NULL score = never evaluated), a pure
+    deterministic engine (eligibility filters in fixed order provider →
+    region → capabilities → budget → availability → eval freshness, then
+    score desc → cost asc → identity asc tie-break), and durable
+    observations. observe.py hooks audit.usage.log_model_usage post-call:
+    computes the recommendation vs the model actually used, persists both
+    separately, then hands off — the hook performs ZERO network I/O
+    (REM-01). The complete bo.model-observation.v1 envelope (stable eventId
+    + server-derived identity) is stored in bo_telemetry_outbox BEFORE the
+    first send attempt and re-sent byte-identically on every retry, so a
+    lost ACK surfaces receiver-side as DUPLICATE, never as a second logical
+    observation. Delivery is a bounded, administrable mechanism
+    (routing/delivery.py): leased claims under BEGIN IMMEDIATE make
+    concurrent flushes race-safe, bo.router.delivery_batch_size /
+    delivery_interval_s / delivery_max_attempts bound it, envelopes past the
+    cap are dead-lettered (delivered=2, visible in status/UI), and catalog
+    syncs share the same outbox. A daemon worker drains it every
+    delivery_interval_s seconds (0 = POST /bo/routing/flush only). It NEVER
+    changes the route, never blocks, never calls a provider, and never
+    raises into the call path; with bo.router.observe_enabled=false
+    (default) it is a no-op. bo.bots imports nothing from bo.routing —
+    BoBots keep zero LLM dependency.

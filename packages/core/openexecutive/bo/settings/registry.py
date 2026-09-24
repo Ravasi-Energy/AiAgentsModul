@@ -98,6 +98,44 @@ def _validate_trust_store(v: Any) -> str:
     return v
 
 
+_CSV_ITEM_RE = re.compile(r"^[^@\s,]+$")
+_COST_CAP_RE = re.compile(r"^\d+(\.\d{1,6})? [A-Z]{3}$")
+
+
+def _validate_csv(v: Any, *, label: str) -> str:
+    """Comma-separated opaque tokens (no spaces/@); empty = unrestricted."""
+    if not isinstance(v, str):
+        raise SettingValidationError(f"{label}: așteptat text CSV")
+    v = v.strip()
+    if _CONTROL_CHAR_RE.search(v):
+        raise SettingValidationError(f"{label}: caractere de control interzise")
+    if len(v) > 1024:
+        raise SettingValidationError(f"{label}: peste limita de 1024 caractere")
+    items = [p.strip() for p in v.split(",") if p.strip()]
+    if len(items) > 64:
+        raise SettingValidationError(f"{label}: cel mult 64 de elemente")
+    for item in items:
+        if not _CSV_ITEM_RE.match(item) or len(item) > 64:
+            raise SettingValidationError(
+                f"{label}: element invalid {item!r} (fără spații/@/, max 64)"
+            )
+    return ",".join(items)
+
+
+def _validate_cost_cap(v: Any) -> str:
+    """``"<decimal> <ISO-4217>"`` or empty — a decimal string, never a float."""
+    if not isinstance(v, str):
+        raise SettingValidationError("Plafonul de cost: așteptat text")
+    v = v.strip()
+    if not v:
+        return v
+    if not _COST_CAP_RE.match(v):
+        raise SettingValidationError(
+            "Plafonul de cost: format „<sumă> <monedă>“, ex. „0.05 USD“"
+        )
+    return v
+
+
 def _validate_timezone(v: Any, *, label: str) -> str:
     if not isinstance(v, str) or not v.strip():
         raise SettingValidationError(f"{label}: așteptat un fus IANA")
@@ -315,6 +353,214 @@ REGISTRY: dict[str, SettingSpec] = {
         effect_ro="Aplicat la fiecare import; dezactivarea permite downgrade fără aprobare.",
         acceptance_ro="Fără aprobare activă legată de tenant/digest/versiuni → ROLLBACK_UNAUTHORIZED.",
         validate=lambda v: _validate_bool(v, label="Aprobare downgrade"),
+    ),
+    "bo.router.observe_enabled": SettingSpec(
+        key="bo.router.observe_enabled",
+        type="boolean",
+        default=False,
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="routing",
+        label_ro="Observare rutare (fără efect)",
+        label_en="Routing observe mode",
+        help_ro="Calculează și înregistrează ce model ar recomanda catalogul la fiecare apel real. Nu schimbă modelul folosit.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Pornit: fiecare apel de model produce o observație persistată; oprit: zero scrieri.",
+        acceptance_ro="Oprit implicit; cu el oprit nu se scrie nicio observație și ruta reală nu se schimbă niciodată.",
+        validate=lambda v: _validate_bool(v, label="Observare rutare"),
+    ),
+    "bo.router.allowed_providers": SettingSpec(
+        key="bo.router.allowed_providers",
+        type="text",
+        default="",
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="routing",
+        label_ro="Provideri permiși (CSV)",
+        label_en="Allowed providers (CSV)",
+        help_ro="Listă CSV de provideri eligibili pentru recomandare. Gol = fără restricție.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Se aplică la următoarea observație; candidații în afara listei → PROVIDER_DENIED.",
+        acceptance_ro="CSV invalid sau cu spații/@ este respins la salvare.",
+        validate=lambda v: _validate_csv(v, label="Provideri permiși"),
+    ),
+    "bo.router.allowed_regions": SettingSpec(
+        key="bo.router.allowed_regions",
+        type="text",
+        default="",
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="routing",
+        label_ro="Regiuni permise (CSV)",
+        label_en="Allowed regions (CSV)",
+        help_ro="Listă CSV de regiuni acceptate pentru date. Gol = fără restricție.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Candidatul fără regiune comună cu lista → REGION_DENIED.",
+        acceptance_ro="CSV invalid este respins la salvare.",
+        validate=lambda v: _validate_csv(v, label="Regiuni permise"),
+    ),
+    "bo.router.required_capabilities": SettingSpec(
+        key="bo.router.required_capabilities",
+        type="text",
+        default="",
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="routing",
+        label_ro="Capabilități cerute (CSV)",
+        label_en="Required capabilities (CSV)",
+        help_ro="Capabilități pe care orice candidat trebuie să le declare. Gol = niciuna.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Candidatul care nu acoperă lista → CAPABILITY_MISSING.",
+        acceptance_ro="CSV invalid este respins la salvare.",
+        validate=lambda v: _validate_csv(v, label="Capabilități cerute"),
+    ),
+    "bo.router.min_quality": SettingSpec(
+        key="bo.router.min_quality",
+        type="integer",
+        default=60,
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="routing",
+        label_ro="Prag minim de calitate (%)",
+        label_en="Minimum quality bar (%)",
+        help_ro="Scorul de calitate [0–100] sub care candidatul nu poate fi recomandat.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Sub prag → metBar=false, decizia observată este REFUSE (QUALITY_BAR_UNMET).",
+        acceptance_ro="Valori în afara 0–100 sunt respinse; pragul nu blochează apelul real.",
+        validate=lambda v: _validate_int(v, minimum=0, maximum=100, label="Pragul de calitate"),
+    ),
+    "bo.router.eval_max_age_days": SettingSpec(
+        key="bo.router.eval_max_age_days",
+        type="integer",
+        default=90,
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="routing",
+        label_ro="Vârsta maximă a evaluării (zile)",
+        label_en="Max evaluation age (days)",
+        help_ro="Peste această vârstă dovada de evaluare e considerată expirată.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Dovadă mai veche decât pragul → STALE_EVALUATION, candidat eliminat.",
+        acceptance_ro="Valori în afara 1–3650 sunt respinse.",
+        validate=lambda v: _validate_int(
+            v, minimum=1, maximum=3650, label="Vârsta maximă a evaluării"
+        ),
+    ),
+    "bo.router.max_estimated_cost": SettingSpec(
+        key="bo.router.max_estimated_cost",
+        type="text",
+        default="",
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="routing",
+        label_ro="Plafon cost estimat per apel",
+        label_en="Max estimated cost per call",
+        help_ro="Format „<sumă> <monedă>“, ex. „0.05 USD“. Gol = fără plafon. Estimare, nu debitare.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Estimarea peste plafon → BUDGET_EXCEEDED; lipsa datelor de cost → COST_DATA_MISSING.",
+        acceptance_ro="Format invalid este respins la salvare; plafonul nu debită și nu rezervă buget.",
+        validate=lambda v: _validate_cost_cap(v),
+    ),
+    "bo.router.observation_retention_days": SettingSpec(
+        key="bo.router.observation_retention_days",
+        type="integer",
+        default=90,
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="routing",
+        label_ro="Retenție observații (zile)",
+        label_en="Observation retention (days)",
+        help_ro="Cât se păstrează observațiile de rutare. Nu atinge auditul.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="La următoarea curățare se șterg doar observațiile mai vechi decât pragul.",
+        acceptance_ro="Sweep-ul șterge doar observații expirate; auditul rămâne neatins.",
+        validate=lambda v: _validate_int(
+            v, minimum=1, maximum=3650, label="Retenția observațiilor"
+        ),
+    ),
+    "bo.router.delivery_interval_s": SettingSpec(
+        key="bo.router.delivery_interval_s",
+        type="integer",
+        default=30,
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="routing",
+        label_ro="Interval livrare telemetrie (s)",
+        label_en="Telemetry delivery interval (s)",
+        help_ro="Cât des golește workerul coada de livrare. 0 = doar flush manual; I/O Guardian nu ajunge niciodată în hookul de observare.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="La următorul tick al workerului; observațiile rămân persistate indiferent.",
+        acceptance_ro="0 dezactivează workerul; flush-ul manual rămâne funcțional.",
+        validate=lambda v: _validate_int(
+            v, minimum=0, maximum=3600, label="Intervalul de livrare"
+        ),
+    ),
+    "bo.router.delivery_batch_size": SettingSpec(
+        key="bo.router.delivery_batch_size",
+        type="integer",
+        default=50,
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="routing",
+        label_ro="Livrat per ciclu (evenimente)",
+        label_en="Delivery batch size",
+        help_ro="Câte plicuri se trimit într-un ciclu de livrare. Mărginește burst-ul spre Guardian.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Ciclurile următoare procesează cel mult această valoare.",
+        acceptance_ro="Limita se aplică la fiecare ciclu worker/flush.",
+        validate=lambda v: _validate_int(
+            v, minimum=1, maximum=500, label="Batch-ul de livrare"
+        ),
+    ),
+    "bo.router.delivery_max_attempts": SettingSpec(
+        key="bo.router.delivery_max_attempts",
+        type="integer",
+        default=25,
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="routing",
+        label_ro="Tentative maxime de livrare",
+        label_en="Max delivery attempts",
+        help_ro="Peste acest prag plicul e marcat eșuat definitiv (vizibil în stare), nu abandonat tăcut.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Plicurile peste prag devin eșuate definitive la următorul ciclu.",
+        acceptance_ro="Eșuările definitive apar în status/outbox, nu se pierd tăcut.",
+        validate=lambda v: _validate_int(
+            v, minimum=1, maximum=1000, label="Tentativele maxime"
+        ),
     ),
 }
 

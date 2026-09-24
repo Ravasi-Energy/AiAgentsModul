@@ -229,6 +229,13 @@ export const ADVANCED_ITEMS: NavItem[] = [
     description:
       "Pachete semnate bo.package.v1 — import verificat, carantină și aprobări de downgrade.",
   },
+  {
+    href: "/bo/routing",
+    label: "BOAgents — Modele și rutare",
+    icon: "bolt",
+    description:
+      "Catalogul de modele administrat și observațiile routerului în mod observare.",
+  },
 ];
 
 // Anchors the mobile bottom nav. ≤5 per Material guidance; "More" opens
