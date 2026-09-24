@@ -38,6 +38,7 @@ def get_conn(db_path: Path | None = None) -> Generator[sqlite3.Connection, None,
 def initialize_db(db_path: Path | None = None) -> None:
     """Create every BOAgents table idempotently. Called from the lifespan."""
     from openexecutive.bo.bots import store as bots_store
+    from openexecutive.bo.execution import store as execution_store
     from openexecutive.bo.packages import store as packages_store
     from openexecutive.bo.routing import store as routing_store
     from openexecutive.bo.settings import store as settings_store
@@ -46,3 +47,4 @@ def initialize_db(db_path: Path | None = None) -> None:
     bots_store.initialize_db(db_path)
     packages_store.initialize_db(db_path)
     routing_store.initialize_db(db_path)
+    execution_store.initialize_db(db_path)

@@ -50,6 +50,9 @@ _CAP_MIN_ROLE: dict[str, Role] = {
     "packages:write": "admin",
     "routing:read": "viewer",
     "routing:write": "admin",
+    "execution:read": "viewer",
+    "execution:write": "admin",
+    "execution:operate": "operator",
 }
 
 
