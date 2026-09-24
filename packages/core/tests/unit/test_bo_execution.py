@@ -10,6 +10,7 @@ retry, stări necunoscute + reconciliere, spoofing actor/tenant, RBAC.
 """
 from __future__ import annotations
 
+import json
 import threading
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -72,12 +73,13 @@ def _fields(**over: Any) -> dict[str, Any]:
 
 
 def _mandate(
-    parent: Any = None, actor: str = "admin", **over: Any
+    parent: Any = None, actor: str = "admin",
+    guardian_ref: str | None = None, **over: Any
 ) -> Any:
     return store.create_mandate(
         TENANT, _fields(**over), parent=parent,
         principal_ref="actor_root", policy_version=1,
-        actor=actor, max_depth_cap=8,
+        actor=actor, max_depth_cap=8, guardian_ref=guardian_ref,
     )
 
 
@@ -801,77 +803,427 @@ class TestLedgerSemantics:
 
 
 # --------------------------------------------------------------------------- #
-# Telemetry events — durable outbox, ACK loss, disabled adapter
+# Evidence events — bo.execution-control.event.v1, durable outbox, Guardian
 # --------------------------------------------------------------------------- #
+
+EXEC_SCHEMA = json.loads(
+    (Path(__file__).parent / "fixtures"
+     / "bo.execution-control.event.v1.schema.json").read_text()
+)
+
+
+def _validate_wire(doc: dict[str, Any]) -> None:
+    import jsonschema
+
+    jsonschema.validate(doc, EXEC_SCHEMA)
+
 
 class TestExecutionEvents:
     def test_events_persist_in_outbox(self, db: Path) -> None:
+        """A real run persists checkpoint + receipt envelopes in the
+        durable outbox — and every one validates against the A02 wire
+        schema (the producer-side guarantee before delivery)."""
         _enable()
         m = _mandate()
-        engine.emit_mandate_event(TENANT, m, kind="created")
+        run = _run(m)
+        _work(SyntheticCounterProvider(idempotent=True))
         from openexecutive.bo.routing import store as routing_store
 
         stats = routing_store.outbox_stats(TENANT)
-        assert stats["outbox_pending"] >= 1
+        assert stats["outbox_pending"] >= 3  # PENDING + CLAIMEDs + receipt
+        rows = routing_store.claim_outbox(
+            TENANT, worker_id="probe", limit=50, lease_s=60,
+        )
+        kinds = {"checkpoint": 0, "receipt": 0}
+        for row in rows:
+            env = row["envelope"]
+            assert env["schemaVersion"] == "bo.execution-control.event.v1"
+            assert env["tenantRef"] == TENANT
+            assert env["correlationId"] == run["correlation_id"]
+            _validate_wire(env)
+            kinds[env["eventType"]] += 1
+            if env["eventType"] == "receipt":
+                r = env["receipt"]
+                assert r["executionRef"] == run["run_id"]
+                assert r["idempotencyKey"]
+                assert r["payloadDigest"].startswith("sha256:")
+                assert r["status"] == "CONFIRMED"
+                assert r["receiptRef"]
+            else:
+                assert env["checkpoint"]["executionRef"] == run["run_id"]
+        assert kinds["checkpoint"] >= 2 and kinds["receipt"] >= 1
 
-    def test_ack_loss_retries_same_envelope(self, db: Path) -> None:
-        """Execution events ride the REM-01 outbox: a lost ACK resends
-        the persisted envelope byte-identically — the receiver's
-        DUPLICATE ack deduplicates by eventId."""
-        _enable()
-        m = _mandate()
-        engine.emit_mandate_event(TENANT, m, kind="created")
+    def test_ack_loss_retries_same_envelope(
+        self, db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A lost ACK resends the persisted envelope BYTE-IDENTICALLY —
+        Guardian deduplicates by eventId; the second send is a
+        DUPLICATE, never a second logical event."""
+        from openexecutive.bo.execution import guardian
         from openexecutive.bo.routing import delivery
         from openexecutive.bo.routing import store as routing_store
-        from openexecutive.bo.telemetry.adapter import (
-            BufferedTransport,
-            TelemetryAdapter,
-        )
 
-        class FlakyTransport(BufferedTransport):
-            def __init__(self) -> None:
-                super().__init__()
-                self.calls = 0
+        _enable()
+        m = _mandate()
+        _run(m)
+        _work(SyntheticCounterProvider(idempotent=True))
 
-            def send(self, event: dict) -> dict:
-                self.calls += 1
-                if self.calls == 1:
-                    raise TimeoutError("ACK pierdut")
-                return {"status": "DUPLICATE", "eventId": event["eventId"]}
+        # Every eventId loses its first ACK — the retry must be the
+        # byte-identical persisted envelope.
+        attempts: dict[str, list[dict[str, Any]]] = {}
 
-        transport = FlakyTransport()
-        adapter = TelemetryAdapter(enabled=True, transport=transport)
-        delivery.deliver_pending(TENANT, adapter=adapter)
-        assert routing_store.outbox_stats(TENANT)["outbox_pending"] == 1
-        delivery.deliver_pending(TENANT, adapter=adapter)
+        def flaky(tenant: str, envelope: dict[str, Any],
+                  db_path: Any = None) -> dict[str, Any]:
+            eid = envelope["eventId"]
+            attempts.setdefault(eid, []).append(envelope)
+            if len(attempts[eid]) == 1:
+                raise guardian.GuardianTransientError("ACK pierdut")
+            return {"status": "DUPLICATE", "eventId": eid}
+
+        monkeypatch.setattr(guardian, "post_execution_event", flaky)
+        delivery.deliver_pending(TENANT)
+        assert routing_store.outbox_stats(TENANT)["outbox_pending"] >= 1
+        delivery.deliver_pending(TENANT)
         stats = routing_store.outbox_stats(TENANT)
         assert stats["outbox_pending"] == 0
-        assert transport.calls == 2
+        assert attempts
+        for sends in attempts.values():
+            assert len(sends) == 2
+            assert sends[0] == sends[1]
 
-    def test_event_shape_and_minimization(self, db: Path) -> None:
+    def test_provisional_envelope_dead_letters(
+        self, db: Path
+    ) -> None:
+        """Pre-REM-01 envelopes (bo.execution-control.v1) can never be
+        accepted by the contract receiver — they dead-letter VISIBLY
+        instead of retrying forever."""
+        from openexecutive.bo.routing import delivery
+        from openexecutive.bo.routing import store as routing_store
+
+        routing_store.enqueue_outbox(TENANT, "execution", "old:1", {
+            "schemaVersion": "bo.execution-control.v1",
+            "eventId": "evt_old1", "tenantRef": TENANT,
+            "occurredAt": "2026-01-01T00:00:00Z",
+            "kind": "receipt", "body": {},
+        })
+        result = delivery.deliver_pending(TENANT)
+        assert result["dead"] == 1
+        stats = routing_store.outbox_stats(TENANT)
+        assert stats["outbox_dead"] == 1
+        assert stats["outbox_pending"] == 0
+        assert "provizoriu" in (stats["outbox_last_error"] or "")
+
+    def test_permanent_refusal_dead_letters(
+        self, db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """422/409/403 from the receiver are non-transient — identical
+        retries can never succeed, so the envelope dead-letters with
+        the receiver's detail visible."""
+        from openexecutive.bo.execution import guardian
+        from openexecutive.bo.routing import delivery
+        from openexecutive.bo.routing import store as routing_store
+
+        _enable()
+        m = _mandate()
+        _run(m)
+        _work(SyntheticCounterProvider(idempotent=True))
+
+        def refuse(tenant: str, envelope: dict[str, Any],
+                   db_path: Any = None) -> dict[str, Any]:
+            raise guardian.GuardianPermanentError(
+                "HTTP 422: schema:receipt.status"
+            )
+
+        monkeypatch.setattr(guardian, "post_execution_event", refuse)
+        result = delivery.deliver_pending(TENANT)
+        assert result["dead"] >= 1
+        stats = routing_store.outbox_stats(TENANT)
+        assert stats["outbox_dead"] >= 1
+        assert "422" in (stats["outbox_last_error"] or "")
+
+    def test_checkpoint_event_shape(self, db: Path) -> None:
         from openexecutive.bo.execution import serialize
 
-        env = serialize.build_execution_event(
-            tenant=TENANT, kind="receipt",
-            body={"runId": "r", "receiptRef": "x"},
+        env = serialize.build_checkpoint_event(
+            TENANT,
+            execution_ref="run_1", mandate_ref="mnd_1", parent_ref=None,
+            step=0, state="CLAIMED", policy_version="1",
+            lease={
+                "ownerRef": "wrk_1", "fencingToken": 3,
+                "expiresAt": FUTURE,
+            },
+            correlation_id="corr_1",
         )
-        assert env["schemaVersion"] == "bo.execution-control.v1"
-        assert env["tenantRef"] == TENANT
+        _validate_wire(env)
         serialize.validate_execution_event(env)
+        # CLAIMED without a lease is a contract violation.
         with pytest.raises(serialize.ExecutionEventError):
-            serialize.build_execution_event(
-                tenant=TENANT, kind="receipt",
-                body={"payload": "secret material"},
+            serialize.build_checkpoint_event(
+                TENANT, execution_ref="run_1", mandate_ref="mnd_1",
+                parent_ref=None, step=0, state="CLAIMED",
+                policy_version="1", correlation_id="corr_1",
             )
-        digest_env = serialize.build_execution_event(
-            tenant=TENANT, kind="receipt",
-            body={"payloadDigest": "sha256:abc"},
+        env2 = serialize.build_checkpoint_event(
+            TENANT, execution_ref="run_1", mandate_ref="mnd_1",
+            parent_ref=None, step=1, state="FAILED", policy_version="1",
+            failure_reason="mandate_revoked", correlation_id="corr_1",
         )
-        serialize.validate_execution_event(digest_env)
+        env2["checkpoint"]["payload"] = "x"  # simulate a leak attempt
         with pytest.raises(serialize.ExecutionEventError):
-            serialize.build_execution_event(
-                tenant=TENANT, kind="bogus", body={},
+            serialize.validate_execution_event(env2)
+
+    def test_receipt_event_shape(self, db: Path) -> None:
+        from openexecutive.bo.execution import serialize
+
+        env = serialize.build_receipt_event(
+            TENANT,
+            execution_ref="run_1", mandate_ref="mnd_1",
+            intent_ref="run_1:0", idempotency_key="idem_1",
+            payload_digest="sha256:" + "ab" * 32,
+            provider="synth-counter", status="CONFIRMED",
+            receipt_ref="rcpt_1", effect_kind="increment",
+            attempt=1, occurred_at="2026-09-24T10:04:00Z",
+            correlation_id="corr_1",
+        )
+        _validate_wire(env)
+        # CONFIRMED without a provider receiptRef is not evidence.
+        with pytest.raises(serialize.ExecutionEventError):
+            serialize.build_receipt_event(
+                TENANT, execution_ref="run_1", mandate_ref="mnd_1",
+                intent_ref="run_1:0", idempotency_key="idem_1",
+                payload_digest="sha256:" + "ab" * 32,
+                provider="synth-counter", status="CONFIRMED",
+                occurred_at="2026-09-24T10:04:00Z",
+                correlation_id="corr_1",
             )
+        # UNKNOWN is a first-class wire state — not a failure proof.
+        env3 = serialize.build_receipt_event(
+            TENANT,
+            execution_ref="run_1", mandate_ref="mnd_1",
+            intent_ref="run_1:0", idempotency_key=None,
+            payload_digest="sha256:" + "ab" * 32,
+            provider="synth-counter", status="UNKNOWN",
+            occurred_at="2026-09-24T10:04:00Z",
+            correlation_id="corr_1",
+        )
+        _validate_wire(env3)
+        # A raw digest without the sha256: prefix is rejected.
+        with pytest.raises(serialize.ExecutionEventError):
+            serialize.build_receipt_event(
+                TENANT, execution_ref="run_1", mandate_ref="mnd_1",
+                intent_ref="run_1:0", idempotency_key="idem_1",
+                payload_digest="ab" * 32,
+                provider="synth-counter", status="FAILED",
+                occurred_at="2026-09-24T10:04:00Z",
+                correlation_id="corr_1",
+            )
+
+
+# --------------------------------------------------------------------------- #
+# Guardian linkage — live mandate status at the effect boundary
+# --------------------------------------------------------------------------- #
+
+class TestGuardianLink:
+    def _link(self, required: bool = True) -> None:
+        settings_store.set_value(
+            TENANT, "bo.exec.guardian_endpoint", "http://guardian.test",
+            expected_version=0, actor="test",
+        )
+        settings_store.set_value(
+            TENANT, "bo.exec.guardian_auth_required", required,
+            expected_version=0, actor="test",
+        )
+
+    def _status(self, body: dict[str, Any] | None = None,
+                error: Exception | None = None):
+        """Fake the Guardian status endpoint via _request."""
+        def fake(method: str, url: str, token: str, timeout: float,
+                 body_arg: Any = None) -> tuple[int, dict[str, Any]]:
+            assert "/v1/mandates/" in url and url.endswith("/status")
+            if error is not None:
+                raise error
+            return 200, body or {"status": "ACTIVE", "expiresAt": FUTURE}
+        return fake
+
+    def test_unbound_mandate_denied_when_required(
+        self, db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from openexecutive.bo.execution import guardian
+
+        self._link(required=True)
+        m = _mandate()  # no guardian_ref
+        with pytest.raises(guardian.GuardianDeniedError) as ei:
+            guardian.assert_effect_authorized(TENANT, m)
+        assert ei.value.kind == "unbound"
+
+    def test_unbound_mandate_passes_when_optional(
+        self, db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from openexecutive.bo.execution import guardian
+
+        self._link(required=False)
+        m = _mandate()
+        guardian.assert_effect_authorized(TENANT, m)  # no raise
+
+    def test_revoked_in_guardian_denied(
+        self, db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from openexecutive.bo.execution import guardian
+
+        self._link()
+        monkeypatch.setenv("BO_GUARDIAN_TOKEN", "tk")
+        monkeypatch.setattr(
+            guardian, "_request",
+            self._status({"status": "REVOKED", "expiresAt": FUTURE}),
+        )
+        m = _mandate(guardian_ref="mnd_g1")
+        with pytest.raises(guardian.GuardianDeniedError) as ei:
+            guardian.assert_effect_authorized(TENANT, m)
+        assert ei.value.kind == "revoked"
+
+    def test_expired_in_guardian_denied(
+        self, db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from openexecutive.bo.execution import guardian
+
+        self._link()
+        monkeypatch.setenv("BO_GUARDIAN_TOKEN", "tk")
+        # Status stays ACTIVE but expiresAt is already past — the client
+        # catches drift the receiver hasn't projected yet.
+        monkeypatch.setattr(
+            guardian, "_request",
+            self._status({"status": "ACTIVE", "expiresAt": PAST}),
+        )
+        m = _mandate(guardian_ref="mnd_g1")
+        with pytest.raises(guardian.GuardianDeniedError) as ei:
+            guardian.assert_effect_authorized(TENANT, m)
+        assert ei.value.kind == "expired"
+
+    def test_not_found_denied(
+        self, db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import io
+        import urllib.error
+
+        from openexecutive.bo.execution import guardian
+
+        self._link()
+        monkeypatch.setenv("BO_GUARDIAN_TOKEN", "tk")
+        err = urllib.error.HTTPError(
+            "u", 404, "nf", {}, io.BytesIO(b'{"detail":"not_found"}'),
+        )
+        monkeypatch.setattr(guardian, "_request", self._status(error=err))
+        m = _mandate(guardian_ref="mnd_g1")
+        with pytest.raises(guardian.GuardianDeniedError) as ei:
+            guardian.assert_effect_authorized(TENANT, m)
+        assert ei.value.kind == "not_found"
+
+    def test_receiver_disabled_pauses_not_denies(
+        self, db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A 404 whose detail is exec_control_disabled means the Guardian
+        module is toggled off — transient. The run must PAUSE
+        (guardian_unavailable), never fail as mandate-not-found."""
+        import io
+        import urllib.error
+
+        from openexecutive.bo.execution import guardian
+
+        _enable()
+        self._link()
+        monkeypatch.setenv("BO_GUARDIAN_TOKEN", "tk")
+        err = urllib.error.HTTPError(
+            "u", 404, "nf", {},
+            io.BytesIO(b'{"detail":"exec_control_disabled"}'),
+        )
+        monkeypatch.setattr(guardian, "_request", self._status(error=err))
+        m = _mandate(guardian_ref="mnd_g1")
+        _run(m)
+        prov = SyntheticCounterProvider(idempotent=True, db_path=db)
+        out = _work(prov)
+        assert out["outcomes"][0]["state"] == store.RUN_PAUSED
+        assert out["outcomes"][0]["block_reason"] == "guardian_unavailable"
+        assert prov.effect_count(TENANT) == 0
+
+    def test_guardian_down_pauses_run(
+        self, db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Guardian unreachable at the effect boundary → the run PAUSES
+        (recoverable) and the synthetic counter proves NO effect ran."""
+        from openexecutive.bo.execution import guardian
+
+        _enable()
+        self._link()
+        monkeypatch.setenv("BO_GUARDIAN_TOKEN", "tk")
+        monkeypatch.setattr(
+            guardian, "_request",
+            self._status(error=TimeoutError("guardian jos")),
+        )
+        m = _mandate(guardian_ref="mnd_g1")
+        _run(m)
+        prov = SyntheticCounterProvider(idempotent=True, db_path=db)
+        out = _work(prov)
+        assert out["outcomes"][0]["state"] == store.RUN_PAUSED
+        assert out["outcomes"][0]["block_reason"] == "guardian_unavailable"
+        assert prov.effect_count(TENANT) == 0
+
+    def test_guardian_revocation_stops_effect(
+        self, db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Revocation visible ONLY in Guardian (local row still active)
+        stops the effect at the boundary — the distributed check is the
+        one that matters."""
+        from openexecutive.bo.execution import guardian
+
+        _enable()
+        self._link()
+        monkeypatch.setenv("BO_GUARDIAN_TOKEN", "tk")
+        monkeypatch.setattr(
+            guardian, "_request",
+            self._status({"status": "REVOKED", "expiresAt": FUTURE}),
+        )
+        m = _mandate(guardian_ref="mnd_g1")
+        _run(m)
+        prov = SyntheticCounterProvider(idempotent=True, db_path=db)
+        out = _work(prov)
+        assert out["outcomes"][0]["state"] == store.RUN_FAILED
+        assert out["outcomes"][0]["block_reason"] == "guardian_revoked"
+        assert prov.effect_count(TENANT) == 0
+
+    def test_active_mandate_effect_runs(
+        self, db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from openexecutive.bo.execution import guardian
+
+        _enable()
+        self._link()
+        monkeypatch.setenv("BO_GUARDIAN_TOKEN", "tk")
+        calls = []
+
+        def spy(method: str, url: str, token: str, timeout: float,
+                body_arg: Any = None) -> tuple[int, dict[str, Any]]:
+            calls.append(url)
+            return 200, {"status": "ACTIVE", "expiresAt": FUTURE}
+
+        monkeypatch.setattr(guardian, "_request", spy)
+        m = _mandate(guardian_ref="mnd_g1")
+        _run(m, steps=[_step(1), _step(2)])
+        prov = SyntheticCounterProvider(idempotent=True, db_path=db)
+        out = _work(prov)
+        assert out["outcomes"][0]["state"] == store.RUN_SUCCEEDED
+        assert prov.total(TENANT) == 3
+        # The boundary check ran once per effectful step.
+        assert len(calls) == 2
+        assert all("/v1/mandates/mnd_g1/status" in u for u in calls)
+
+    def test_no_endpoint_means_local_only(self, db: Path) -> None:
+        """Endpoint unset → the Guardian check is a no-op; the local
+        chain remains the only authority (documented behavior)."""
+        from openexecutive.bo.execution import guardian
+
+        _enable()
+        m = _mandate(guardian_ref="mnd_g1")
+        guardian.assert_effect_authorized(TENANT, m)
 
 
 # --------------------------------------------------------------------------- #

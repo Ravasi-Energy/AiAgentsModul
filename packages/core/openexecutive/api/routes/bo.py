@@ -541,6 +541,7 @@ def flush_routing_observations(ident: BoIdentity) -> Any:
 
 class _MandateCreate(BaseModel):
     parent_mandate_id: str | None = None
+    guardian_ref: str | None = Field(default=None, min_length=1, max_length=128)
     allowed_resources: list[str] = Field(min_length=1, max_length=64)
     allowed_actions: list[str] = Field(min_length=1, max_length=64)
     budget_limit: str | float | int
@@ -585,6 +586,7 @@ def _mandate_json(m: Any) -> dict[str, Any]:
         "state": mandate_state(m),
         "revoked_at": m.revoked_at,
         "revoked_reason": m.revoked_reason,
+        "guardian_ref": getattr(m, "guardian_ref", None),
         "created_by": m.created_by,
         "created_at": m.created_at,
     }
@@ -632,8 +634,8 @@ def create_mandate(body: _MandateCreate, ident: BoIdentity) -> Any:
         policy_version=policy_version,
         actor=ident.actor,
         max_depth_cap=max_depth_cap,
+        guardian_ref=body.guardian_ref,
     )
-    exec_engine.emit_mandate_event(tenant, mandate, kind="created")
     return {"mandate": _mandate_json(mandate)}
 
 
@@ -648,7 +650,6 @@ def revoke_mandate(
     mandate = exec_store.revoke_mandate(
         ident.tenant, mandate_id, reason=body.reason, actor=ident.actor,
     )
-    exec_engine.emit_mandate_event(ident.tenant, mandate, kind="revoked")
     return {"mandate": _mandate_json(mandate)}
 
 

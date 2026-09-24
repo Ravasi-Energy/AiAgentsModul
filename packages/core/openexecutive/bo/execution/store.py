@@ -113,12 +113,22 @@ def initialize_db(db_path: Path | None = None) -> None:
                 policy_version      INTEGER NOT NULL,
                 revoked_at          TEXT,
                 revoked_reason      TEXT,
+                guardian_ref        TEXT,
                 created_by          TEXT NOT NULL,
                 created_at          TEXT NOT NULL,
                 PRIMARY KEY (tenant, mandate_id)
             )
             """
         )
+        if "guardian_ref" not in {
+            r[1] for r in conn.execute(
+                "PRAGMA table_info(bo_exec_mandates)"
+            ).fetchall()
+        }:
+            conn.execute(
+                "ALTER TABLE bo_exec_mandates "
+                "ADD COLUMN guardian_ref TEXT"
+            )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS bo_exec_runs (
@@ -270,6 +280,7 @@ def _mandate_from_row(row: Any) -> Mandate:
         revoked_reason=row["revoked_reason"],
         created_by=row["created_by"],
         created_at=row["created_at"],
+        guardian_ref=row["guardian_ref"],
     )
 
 
@@ -282,6 +293,7 @@ def create_mandate(
     policy_version: int,
     actor: str,
     max_depth_cap: int,
+    guardian_ref: str | None = None,
     db_path: Path | None = None,
 ) -> Mandate:
     """Validate + persist a mandate. ``parent=None`` creates a root.
@@ -292,6 +304,15 @@ def create_mandate(
     principal either (no identity widening through delegation).
     """
     v = validate_mandate_fields(**fields)
+    if guardian_ref is not None and (
+        not isinstance(guardian_ref, str)
+        or not (1 <= len(guardian_ref) <= 128)
+        or any(ch.isspace() for ch in guardian_ref)
+        or "@" in guardian_ref
+    ):
+        raise MandateValidationError(
+            "guardian_ref: ref opac invalid (1..128, fără spații/@)"
+        )
     if parent is not None:
         state = mandate_state(parent)
         if state != "active":
@@ -326,6 +347,7 @@ def create_mandate(
         revoked_reason=None,
         created_by=actor,
         created_at=_now(),
+        guardian_ref=guardian_ref,
     )
     with get_conn(db_path) as conn:
         conn.execute(
@@ -334,8 +356,8 @@ def create_mandate(
                 tenant, mandate_id, parent_mandate_id, principal_ref, depth,
                 allowed_resources, allowed_actions, budget_limit,
                 concurrency_limit, max_steps, max_depth, expires_at,
-                policy_version, created_by, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                policy_version, guardian_ref, created_by, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 tenant, mandate.mandate_id, mandate.parent_mandate_id,
@@ -344,7 +366,8 @@ def create_mandate(
                 json.dumps(sorted(mandate.allowed_actions)),
                 str(mandate.budget_limit), mandate.concurrency_limit,
                 mandate.max_steps, mandate.max_depth, mandate.expires_at,
-                mandate.policy_version, actor, mandate.created_at,
+                mandate.policy_version, guardian_ref, actor,
+                mandate.created_at,
             ),
         )
     _audit(tenant, "bo_mandate_create", {

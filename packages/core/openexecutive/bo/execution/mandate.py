@@ -55,6 +55,7 @@ class Mandate:
     revoked_reason: str | None
     created_by: str
     created_at: str
+    guardian_ref: str | None = None
 
 
 def _validate_token(v: Any, *, label: str) -> str:

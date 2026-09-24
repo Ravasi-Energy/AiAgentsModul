@@ -25,7 +25,7 @@ from __future__ import annotations
 import logging
 import uuid
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -105,12 +105,9 @@ def submit_execution(
         correlation_id=correlation_id or f"corr_{uuid.uuid4().hex[:20]}",
         actor=actor, parent_run_id=parent_run_id, db_path=db_path,
     )
-    _emit_event(tenant, "run", {
-        "runId": run["run_id"], "mandateId": mandate_id,
-        "state": store.RUN_PENDING, "steps": len(steps),
-        "correlationId": run["correlation_id"],
-        "policyVersion": str(run["policy_version"]),
-    }, ref_id=f"{run['run_id']}:submit", db_path=db_path)
+    _emit_checkpoint(
+        tenant, run, mandate, step=0, state="PENDING", db_path=db_path,
+    )
     return run
 
 
@@ -174,10 +171,27 @@ def execute_run(
             fence=fence, db_path=db_path, **kw,
         )
 
+    mandate = store.get_mandate(tenant, run["mandate_id"], db_path=db_path)
     try:
         transition(store.RUN_RUNNING)
     except store.ConflictError:
         return {"run_id": run_id, "state": "lost-claim"}
+    # Lease evidence: the fencing token identifies which worker epoch
+    # produced each state. Terminal checkpoints carry it too — Guardian
+    # orders by (fencing, step, time), so a leaseless terminal event
+    # would look older than the CLAIMED that precedes it.
+    lease_evidence = {
+        "ownerRef": worker_id,
+        "fencingToken": fence,
+        "expiresAt": (
+            datetime.now(UTC) + timedelta(seconds=lease_s)
+        ).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+    }
+    _emit_checkpoint(
+        tenant, run, mandate, step=run["current_step"], state="CLAIMED",
+        lease=lease_evidence,
+        db_path=db_path,
+    )
 
     chain_ids = run["mandate_id"]
     for step_idx in range(run["current_step"], len(run["steps"])):
@@ -189,11 +203,24 @@ def execute_run(
                     store.RUN_CANCELLED, clear_lease=True,
                     reservation_state=store.RES_RELEASED,
                 )
+                _emit_checkpoint(
+                    tenant, fresh, mandate, step=step_idx, state="FAILED",
+                    lease=lease_evidence,
+                    reason="cancelled_by_operator", db_path=db_path,
+                )
                 return {"run_id": run_id, "state": store.RUN_CANCELLED}
             if fresh["pause_requested"]:
                 transition(store.RUN_PAUSED, clear_lease=True)
+                _emit_checkpoint(
+                    tenant, fresh, mandate, step=step_idx, state="PENDING",
+                    lease=lease_evidence,
+                    reason="pause_requested", db_path=db_path,
+                )
                 return {"run_id": run_id, "state": store.RUN_PAUSED}
-            # 2. Mandate chain re-check at the EFFECT boundary.
+            # 2. Mandate chain re-check at the EFFECT boundary — local
+            # chain first, then the Guardian-held status when the
+            # mandate is bound to the Guardian authority (REM-01).
+            block: str | None = None
             try:
                 for link in store.mandate_chain(
                     tenant, chain_ids, db_path=db_path
@@ -203,6 +230,33 @@ def execute_run(
                 reason = "mandate_revoked" if isinstance(
                     exc, MandateRevokedError
                 ) else "mandate_expired"
+                block = f"{reason}: {exc}"
+            else:
+                from openexecutive.bo.execution import guardian
+                try:
+                    guardian.assert_effect_authorized(
+                        tenant, mandate, db_path=db_path
+                    )
+                except guardian.GuardianUnavailableError as exc:
+                    # Mandatory dependency down — pause, don't fail: the
+                    # operator can resume once Guardian is reachable.
+                    transition(
+                        store.RUN_PAUSED, clear_lease=True,
+                        block_reason=f"guardian_unavailable: {exc}"[:300],
+                    )
+                    _emit_checkpoint(
+                        tenant, fresh, mandate, step=step_idx,
+                        state="PENDING", lease=lease_evidence,
+                        reason="guardian_authorization_unavailable",
+                        db_path=db_path,
+                    )
+                    return {
+                        "run_id": run_id, "state": store.RUN_PAUSED,
+                        "block_reason": "guardian_unavailable",
+                    }
+                except guardian.GuardianDeniedError as exc:
+                    block = f"guardian_{exc.kind}: {exc}"
+            if block is not None:
                 counts = store.ledger_counts(tenant, run_id, db_path=db_path)
                 state = (
                     store.RUN_RECONCILIATION
@@ -211,12 +265,17 @@ def execute_run(
                 )
                 transition(
                     state, clear_lease=True,
-                    block_reason=f"{reason}: {exc}",
+                    block_reason=block[:300],
                     reservation_state=store.RES_RELEASED,
+                )
+                _emit_checkpoint(
+                    tenant, fresh, mandate, step=step_idx,
+                    state=state, lease=lease_evidence,
+                    reason=block.split(":")[0], db_path=db_path,
                 )
                 return {
                     "run_id": run_id, "state": state,
-                    "block_reason": reason,
+                    "block_reason": block.split(":")[0],
                 }
         except store.ConflictError:
             return {"run_id": run_id, "state": "lost-claim"}
@@ -261,6 +320,15 @@ def execute_run(
                 )
             except store.ConflictError:
                 return {"run_id": run_id, "state": "lost-claim"}
+            _emit_checkpoint(
+                tenant, fresh, mandate, step=step_idx,
+                state=_RUN_TO_EVENT_STATE.get(
+                    outcome["terminal"], "FAILED"
+                ),
+                lease=lease_evidence,
+                reason=(outcome.get("block_reason") or "")[:256] or None,
+                db_path=db_path,
+            )
             return {"run_id": run_id, "state": outcome["terminal"],
                     **({"block_reason": outcome["block_reason"]}
                        if outcome.get("block_reason") else {})}
@@ -291,14 +359,19 @@ def execute_run(
             )
         except store.ConflictError:
             return {"run_id": run_id, "state": "lost-claim"}
+        _emit_checkpoint(
+            tenant, fresh, mandate, step=step_idx + 1, state="CLAIMED",
+            lease=lease_evidence,
+            db_path=db_path,
+        )
     transition(
         store.RUN_SUCCEEDED, clear_lease=True,
         reservation_state=store.RES_COMMITTED,
     )
-    _emit_event(tenant, "run", {
-        "runId": run_id, "state": store.RUN_SUCCEEDED,
-        "correlationId": run["correlation_id"],
-    }, ref_id=f"{run_id}:succeeded", db_path=db_path)
+    _emit_checkpoint(
+        tenant, fresh, mandate, step=len(run["steps"]),
+        state="SUCCEEDED", lease=lease_evidence, db_path=db_path,
+    )
     return {"run_id": run_id, "state": store.RUN_SUCCEEDED}
 
 
@@ -315,7 +388,6 @@ def _execute_step(
     """Ledger + one provider call for step ``step``. Returns
     ``{"terminal": None, "ledger_status": ..., "receipt_ref": ...}`` to
     continue, or a terminal run state to stop."""
-    run_id = run["run_id"]
     step_desc = run["steps"][step]
     payload = step_desc.get("payload", {})
     try:
@@ -351,11 +423,10 @@ def _execute_step(
                 receipt_ref=receipt["receipt_ref"], receipt=receipt,
                 db_path=db_path,
             )
-            _emit_event(tenant, "receipt", {
-                "runId": run_id, "step": step,
-                "receiptRef": receipt["receipt_ref"],
-                "provider": provider.name, "via": "lookup",
-            }, ref_id=f"{entry['entry_id']}:receipt", db_path=db_path)
+            _emit_receipt(
+                tenant, run, entry, status="CONFIRMED",
+                receipt_ref=receipt["receipt_ref"], db_path=db_path,
+            )
             return {
                 "terminal": None, "ledger_status": store.LED_SUCCEEDED,
                 "receipt_ref": receipt["receipt_ref"],
@@ -403,6 +474,9 @@ def _execute_step(
             fence_version=entry["fence_version"], db_path=db_path,
         ):
             return {"terminal": "fenced"}
+        _emit_receipt(
+            tenant, run, entry, status="UNKNOWN", db_path=db_path,
+        )
         return {
             "terminal": store.RUN_UNKNOWN if provider.idempotent
             else store.RUN_RECONCILIATION,
@@ -415,6 +489,9 @@ def _execute_step(
             fence_version=entry["fence_version"], db_path=db_path,
         ):
             return {"terminal": "fenced"}
+        _emit_receipt(
+            tenant, run, entry, status="FAILED", db_path=db_path,
+        )
         return {"terminal": store.RUN_FAILED, "block_reason": str(exc)}
     except Exception:  # noqa: BLE001 — infrastructure failure, not a
         if not store.finalize_ledger_entry(  # definitive provider answer
@@ -422,6 +499,9 @@ def _execute_step(
             fence_version=entry["fence_version"], db_path=db_path,
         ):
             return {"terminal": "fenced"}
+        _emit_receipt(
+            tenant, run, entry, status="UNKNOWN", db_path=db_path,
+        )
         return {"terminal": store.RUN_UNKNOWN}
 
     if not store.finalize_ledger_entry(
@@ -431,12 +511,10 @@ def _execute_step(
         db_path=db_path,
     ):
         return {"terminal": "fenced"}
-    _emit_event(tenant, "receipt", {
-        "runId": run_id, "step": step,
-        "receiptRef": receipt["receipt_ref"], "provider": provider.name,
-        "idempotencyKey": entry["idempotency_key"],
-        "deduplicated": receipt.get("deduplicated", False),
-    }, ref_id=f"{entry['entry_id']}:receipt", db_path=db_path)
+    _emit_receipt(
+        tenant, run, entry, status="CONFIRMED",
+        receipt_ref=receipt["receipt_ref"], db_path=db_path,
+    )
     return {
         "terminal": None, "ledger_status": store.LED_SUCCEEDED,
         "receipt_ref": receipt["receipt_ref"],
@@ -581,25 +659,32 @@ def _audit(tenant: str, event: str, details: dict[str, Any], *, actor: str) -> N
     )
 
 
-def _emit_event(
-    tenant: str,
-    kind: str,
-    body: dict[str, Any],
-    *,
-    ref_id: str,
-    db_path: Path | None = None,
+# Internal run state -> checkpoint state on the wire. PAUSED maps to
+# PENDING (the run is claimable again); CANCELLED to FAILED — the
+# contract has no cancellation state and a cancelled run is definitively
+# stopped, with the reason in ``failureReason``.
+_RUN_TO_EVENT_STATE = {
+    store.RUN_PENDING: "PENDING",
+    store.RUN_CLAIMED: "CLAIMED",
+    store.RUN_RUNNING: "CLAIMED",
+    store.RUN_PAUSED: "PENDING",
+    store.RUN_SUCCEEDED: "SUCCEEDED",
+    store.RUN_FAILED: "FAILED",
+    store.RUN_CANCELLED: "FAILED",
+    store.RUN_UNKNOWN: "UNKNOWN",
+    store.RUN_RECONCILIATION: "RECONCILIATION_REQUIRED",
+}
+
+
+def _enqueue(
+    tenant: str, ref_id: str, envelope: dict[str, Any],
+    db_path: Path | None,
 ) -> None:
-    """Serialize a bo.execution-control.v1-shaped event and persist it in
-    the SAME durable outbox as routing (different ``kind`` — ref_ids are
-    unique per event so nothing coalesces). Delivery failure never erases
-    local execution evidence."""
-    from openexecutive.bo.execution import serialize
+    """Persist the sealed envelope in the durable outbox — delivery
+    failure never erases local execution evidence."""
     from openexecutive.bo.routing import store as routing_store
 
     try:
-        envelope = serialize.build_execution_event(
-            tenant=tenant, kind=kind, body=body,
-        )
         routing_store.enqueue_outbox(
             tenant, "execution", ref_id, envelope, db_path=db_path,
         )
@@ -608,18 +693,114 @@ def _emit_event(
                        exc_info=True)
 
 
-def emit_mandate_event(
+_REASON_ALLOWED = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_:. /-"
+)
+
+
+def _safe_reason(reason: str | None) -> str | None:
+    """The contract's ``failureReason`` charset is ASCII-only — internal
+    Romanian messages carry diacritics and punctuation the wire pattern
+    rejects. Map anything else to ``_``; drop if nothing survives."""
+    if not reason:
+        return None
+    cleaned = "".join(ch if ch in _REASON_ALLOWED else "_" for ch in reason)
+    cleaned = cleaned.strip()[:256]
+    return cleaned or None
+
+
+def _emit_checkpoint(
     tenant: str,
+    run: dict[str, Any],
     mandate: Any,
     *,
-    kind: str,
+    step: int,
+    state: str,
+    lease: dict[str, Any] | None = None,
+    digest: str | None = None,
+    reason: str | None = None,
     db_path: Path | None = None,
 ) -> None:
-    _emit_event(tenant, "mandate", {
-        "mandateId": mandate.mandate_id,
-        "parentMandateId": mandate.parent_mandate_id,
-        "depth": mandate.depth,
-        "action": kind,
-        "policyVersion": str(mandate.policy_version),
-    }, ref_id=f"{mandate.mandate_id}:{kind}:{uuid.uuid4().hex[:8]}",
-    db_path=db_path)
+    """Emit a ``checkpoint`` event — execution state, never effect
+    evidence. ``mandateRef`` is the Guardian-bound ref when the mandate
+    carries one, else the local mandate id."""
+    from openexecutive.bo.execution import serialize
+
+    try:
+        mandate_ref = getattr(mandate, "guardian_ref", None) or (
+            mandate.mandate_id if mandate else run["mandate_id"]
+        )
+        parent_ref = (
+            getattr(mandate, "parent_mandate_id", None)
+            if mandate else None
+        )
+        env = serialize.build_checkpoint_event(
+            tenant,
+            execution_ref=run["run_id"],
+            mandate_ref=mandate_ref,
+            parent_ref=parent_ref,
+            step=step,
+            state=state,
+            policy_version=str(run["policy_version"]),
+            lease=lease,
+            checkpoint_digest=(
+                f"sha256:{digest}" if digest and
+                not digest.startswith("sha256:") else digest
+            ),
+            failure_reason=_safe_reason(reason),
+            correlation_id=run["correlation_id"],
+        )
+        _enqueue(tenant, f"{run['run_id']}:{step}:{state}:{uuid.uuid4().hex[:8]}",
+                 env, db_path)
+    except Exception:  # noqa: BLE001 — telemetry must never gate execution
+        logger.warning("checkpointul de execuție nu a putut fi emis",
+                       exc_info=True)
+
+
+def _emit_receipt(
+    tenant: str,
+    run: dict[str, Any],
+    entry: dict[str, Any],
+    *,
+    status: str,
+    receipt_ref: str | None = None,
+    db_path: Path | None = None,
+) -> None:
+    """Emit a ``receipt`` event — the effect-ledger evidence: intentRef,
+    idempotencyKey, payloadDigest, provider status, receiptRef."""
+    from openexecutive.bo.execution import serialize
+
+    try:
+        mandate = store.get_mandate(
+            tenant, run["mandate_id"], db_path=db_path
+        )
+        env = serialize.build_receipt_event(
+            tenant,
+            execution_ref=run["run_id"],
+            mandate_ref=getattr(mandate, "guardian_ref", None)
+            or run["mandate_id"],
+            intent_ref=entry["intent_ref"],
+            idempotency_key=entry["idempotency_key"],
+            payload_digest=(
+                f"sha256:{entry['payload_digest']}"
+                if not entry["payload_digest"].startswith("sha256:")
+                else entry["payload_digest"]
+            ),
+            provider=entry["provider"],
+            status=status,
+            receipt_ref=receipt_ref,
+            effect_kind=f"{entry['action']}",
+            attempt=max(1, int(entry["attempts"])),
+            occurred_at=(
+                entry.get("finalized_at") or entry.get("submitted_at")
+                or datetime.now(UTC).isoformat(
+                    timespec="milliseconds"
+                ).replace("+00:00", "Z")
+            ),
+            correlation_id=run["correlation_id"],
+        )
+        _enqueue(tenant, f"{entry['entry_id']}:receipt:{uuid.uuid4().hex[:8]}",
+                 env, db_path)
+    except Exception:  # noqa: BLE001 — telemetry must never gate execution
+        logger.warning("receiptul de execuție nu a putut fi emis",
+                       exc_info=True)

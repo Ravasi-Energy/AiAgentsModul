@@ -100,6 +100,35 @@ def _validate_trust_store(v: Any) -> str:
 
 _CSV_ITEM_RE = re.compile(r"^[^@\s,]+$")
 _COST_CAP_RE = re.compile(r"^\d+(\.\d{1,6})? [A-Z]{3}$")
+_SECRET_REF_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+
+
+def _validate_urlish(v: Any, *, label: str) -> str:
+    """http(s) base URL or empty — trailing slash stripped."""
+    if not isinstance(v, str):
+        raise SettingValidationError(f"{label}: așteptat text")
+    v = v.strip().rstrip("/")
+    if _CONTROL_CHAR_RE.search(v):
+        raise SettingValidationError(f"{label}: caractere de control interzise")
+    if not v:
+        return v
+    if len(v) > 512 or not v.startswith(("http://", "https://")) or " " in v:
+        raise SettingValidationError(
+            f"{label}: așteptat URL http(s) valid, max 512 caractere"
+        )
+    return v
+
+
+def _validate_secret_ref(v: Any, *, label: str) -> str:
+    """Name of an env var holding the secret — never the secret itself."""
+    if not isinstance(v, str):
+        raise SettingValidationError(f"{label}: așteptat text")
+    v = v.strip()
+    if not _SECRET_REF_RE.match(v):
+        raise SettingValidationError(
+            f"{label}: așteptat nume de variabilă de mediu (ex. BO_GUARDIAN_TOKEN)"
+        )
+    return v
 
 
 def _validate_csv(v: Any, *, label: str) -> str:
@@ -717,6 +746,80 @@ REGISTRY: dict[str, SettingSpec] = {
         validate=lambda v: _validate_int(
             v, minimum=0, maximum=3650, label="Retenția execuțiilor"
         ),
+    ),
+    "bo.exec.guardian_endpoint": SettingSpec(
+        key="bo.exec.guardian_endpoint",
+        type="text",
+        default="",
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="exec",
+        label_ro="Endpoint Guardian (autorizare + evenimente)",
+        label_en="Guardian endpoint (authorization + events)",
+        help_ro="URL de bază Guardian pentru statusul mandatului și livrarea evenimentelor de execuție. Gol = fără legătură Guardian (doar lanțul local).",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Setat: fiecare frontieră de efect reverifică starea mandatului în Guardian; outbox-ul livrează către /v1/execution-events.",
+        acceptance_ro="Gol: verificarea Guardian e oprită; setat fără guardian_ref pe mandat → efectul e blocat doar dacă autorizarea e obligatorie.",
+        validate=lambda v: _validate_urlish(v, label="Endpoint Guardian"),
+    ),
+    "bo.exec.guardian_secret_ref": SettingSpec(
+        key="bo.exec.guardian_secret_ref",
+        type="text",
+        default="BO_GUARDIAN_TOKEN",
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="exec",
+        label_ro="Referință secret Guardian",
+        label_en="Guardian secret reference",
+        help_ro="Numele variabilei de mediu care ține tokenul Bearer către Guardian — SecretRef, niciodată valoarea.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Clientul Guardian citește tokenul din variabila de mediu numită aici; lipsa ei e tratată ca eroare de configurare.",
+        acceptance_ro="Doar numele variabilei e persistat — tokenul nu ajunge în DB, request-uri sau loguri.",
+        validate=lambda v: _validate_secret_ref(v, label="Referința de secret"),
+    ),
+    "bo.exec.guardian_timeout_s": SettingSpec(
+        key="bo.exec.guardian_timeout_s",
+        type="integer",
+        default=5,
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="exec",
+        label_ro="Timeout cereri Guardian (s)",
+        label_en="Guardian request timeout (s)",
+        help_ro="Timeout pe cererea de autorizare/livrare către Guardian.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Depășirea timeoutului la autorizare blochează efectul când legătura e obligatorie.",
+        acceptance_ro="Între 1 și 30 secunde.",
+        validate=lambda v: _validate_int(
+            v, minimum=1, maximum=30, label="Timeout Guardian"
+        ),
+    ),
+    "bo.exec.guardian_auth_required": SettingSpec(
+        key="bo.exec.guardian_auth_required",
+        type="boolean",
+        default=False,
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="exec",
+        label_ro="Autorizare Guardian obligatorie",
+        label_en="Guardian authorization required",
+        help_ro="Pornit: efectul NU rulează dacă Guardian nu poate fi atins sau mandatele nu au guardian_ref. Oprit: indisponibilitatea se jurnalizează, nu blochează.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Pornit: Guardian indisponibil sau mandat refuzat/expirat → execuția se oprește înainte de efect (pauză recuperabilă la indisponibilitate).",
+        acceptance_ro="Fereastra dintre verificare și efect e minimă, dar nenulă — cursele distribuite nu sunt eliminate.",
+        validate=lambda v: _validate_bool(v, label="Autorizarea Guardian obligatorie"),
     ),
 }
 
