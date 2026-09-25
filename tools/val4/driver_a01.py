@@ -24,10 +24,12 @@ BO_TELEMETRY_ENABLED=1, BO_TELEMETRY_ENDPOINT (URL complet
 BO_TELEMETRY_PRODUCER_ID, BO_INSTALLATION_ID.
 
 Legătura Guardian — EXPLICITĂ și stabilă (VAL4-03):
-  GATE_BASE sau baza derivată din BO_TELEMETRY_ENDPOINT → endpointul de
-  autorizare; BO_GUARDIAN_ADMIN_TOKEN (implicit „exadmin", credențialul
-  sintetic execpolicy al gate-ului) → emiterea mandatului și stratul de
-  drepturi efective în probe.
+  BO_GUARDIAN_URL, apoi baza derivată din BO_TELEMETRY_ENDPOINT
+  (endpointul pe care produsul îl „vede" — gate-ul îl poate redirecționa
+  spre un stub de autoritate), apoi GATE_BASE ca fallback → endpointul
+  de autorizare; BO_GUARDIAN_ADMIN_TOKEN (implicit „exadmin",
+  credențialul sintetic execpolicy al gate-ului) → emiterea mandatului
+  și stratul de drepturi efective în probe.
   Rezolvarea guardian_ref: --guardian-ref → BO_GUARDIAN_MANDATE_REF →
   „mnd-gate-val402" (ID fix al sondei, doar dacă e ACTIVE) → mandat
   emis proaspăt „mnd-a01-*" (ID-ul întors de Guardian). NICIODATĂ
@@ -78,14 +80,17 @@ def _set(tenant: str, key: str, value, actor: str = "driver-gate") -> None:
 
 
 def _guardian_base() -> str:
-    """URL-ul de bază Guardian: GATE_BASE, apoi derivat din endpointul
-    complet de livrare, apoi BO_GUARDIAN_URL."""
-    if os.environ.get("GATE_BASE"):
-        return os.environ["GATE_BASE"].rstrip("/")
+    """URL-ul de bază Guardian: endpointul explicit BO_GUARDIAN_URL,
+    apoi baza derivată din BO_TELEMETRY_ENDPOINT (endpointul de livrare
+    al produsului — gate-ul îl redirectionează spre stub-uri de
+    autoritate pentru probele de răspuns invalid), apoi GATE_BASE
+    (knob intern al instrumentului, doar fallback)."""
+    if os.environ.get("BO_GUARDIAN_URL"):
+        return os.environ["BO_GUARDIAN_URL"].rstrip("/")
     ep = os.environ.get("BO_TELEMETRY_ENDPOINT", "").rstrip("/")
     if ep:
         return ep.split("/v1/")[0]
-    return os.environ.get("BO_GUARDIAN_URL", "").rstrip("/")
+    return os.environ.get("GATE_BASE", "").rstrip("/")
 
 
 def _admin_token() -> str:
