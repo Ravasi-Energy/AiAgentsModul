@@ -552,8 +552,25 @@ export interface BoMandate {
   state: string;
   revoked_at: string | null;
   revoked_reason: string | null;
+  guardian_ref: string | null;
   created_by: string;
   created_at: string;
+}
+
+export interface BoGuardianInfo {
+  bound_ref: string | null;
+  endpoint_configured: boolean;
+  credential_configured: boolean;
+  auth_required: boolean;
+  policy_layer: boolean;
+}
+
+export interface BoAuthorityCheck {
+  authorized: boolean;
+  mode: "guardian" | "standalone" | "denied" | "unavailable";
+  kind: string | null;
+  detail: string | null;
+  guardian: BoGuardianInfo;
 }
 
 export interface BoExecRun {
@@ -621,6 +638,7 @@ export interface BoRunDetail {
     slots: number;
     state: string;
   } | null;
+  guardian: BoGuardianInfo;
   limits_note: string;
 }
 
@@ -629,6 +647,7 @@ export interface BoExecStatus {
   runs_total: number;
   by_state: Record<string, number>;
   synthetic_effect_total: number;
+  guardian: BoGuardianInfo;
   limits: Record<string, unknown>;
   note: string;
 }
@@ -639,6 +658,7 @@ export function getBoMandates(): Promise<{ mandates: BoMandate[] }> {
 
 export function createBoMandate(payload: {
   parent_mandate_id?: string;
+  guardian_ref?: string;
   allowed_resources: string[];
   allowed_actions: string[];
   budget_limit: string;
@@ -686,12 +706,30 @@ export function getBoRunDetail(runId: string): Promise<BoRunDetail> {
   return req(`/execution/runs/${runId}`);
 }
 
-export function pauseBoRun(runId: string): Promise<{ run: BoExecRun }> {
-  return req(`/execution/runs/${runId}/pause`, { method: "POST" });
+export function pauseBoRun(
+  runId: string,
+  reason?: string,
+): Promise<{ run: BoExecRun }> {
+  return req(`/execution/runs/${runId}/pause`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(reason ? { reason } : {}),
+  });
 }
 
-export function cancelBoRun(runId: string): Promise<{ run: BoExecRun }> {
-  return req(`/execution/runs/${runId}/cancel`, { method: "POST" });
+export function cancelBoRun(
+  runId: string,
+  reason: string,
+): Promise<{ run: BoExecRun }> {
+  return req(`/execution/runs/${runId}/cancel`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ reason }),
+  });
+}
+
+export function getBoRunAuthority(runId: string): Promise<BoAuthorityCheck> {
+  return req(`/execution/runs/${runId}/authority`);
 }
 
 export function resumeBoRun(runId: string): Promise<{ run: BoExecRun }> {
@@ -718,6 +756,40 @@ export function workBoRuns(workerId?: string): Promise<{
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(workerId ? { worker_id: workerId } : {}),
+  });
+}
+
+export interface BoOutboxEntry {
+  event_id: string;
+  kind: string;
+  ref_id: string | null;
+  event_type: string | null;
+  schema_version: string | null;
+  envelope: Record<string, unknown>;
+  created_at: string;
+  attempts: number;
+  delivered: number; // 0 pending · 1 livrat · 2 dead-letter
+  last_error: string | null;
+  lease_owner: string | null;
+  lease_until: string | null;
+}
+
+export function listBoOutbox(
+  delivered?: number,
+): Promise<{ entries: BoOutboxEntry[]; stats: Record<string, number> }> {
+  return req(
+    `/execution/outbox${delivered !== undefined ? `?delivered=${delivered}` : ""}`,
+  );
+}
+
+export function retryBoOutbox(
+  eventId: string,
+  reason: string,
+): Promise<{ event_id: string; requeued: boolean }> {
+  return req(`/execution/outbox/${encodeURIComponent(eventId)}/retry`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ reason }),
   });
 }
 

@@ -283,6 +283,73 @@ class TestSubmission:
         t2.join()
         assert sorted(results) == ["ok", "refused"]
 
+    def test_tenant_budget_cap_refuses(self, db: Path) -> None:
+        """bo.exec.budget_cap — plafon tenant peste mandat: trimiterea
+        peste plafon e refuzată chiar dacă mandatul ar permite."""
+        _enable()
+        settings_store.set_value(
+            TENANT, "bo.exec.budget_cap", "4.00 USD",
+            expected_version=0, actor="test",
+        )
+        m = _mandate(budget_limit="50")
+        _run(m, budget="4")  # la plafon — permis
+        with pytest.raises(MandateValidationError):
+            _run(m, budget="4.01")  # peste plafonul tenantului
+
+    def test_effect_attempt_cap_forces_reconciliation(self, db: Path) -> None:
+        """Peste bo.exec.max_effect_attempts o intrare SUBMITTED nu mai
+        e revendicată automat — trece în reconciliere, nu reîncearcă."""
+        _enable()
+        settings_store.set_value(
+            TENANT, "bo.exec.max_effect_attempts", 1,
+            expected_version=0, actor="test",
+        )
+        m = _mandate()
+        run = _run(m)
+        prov = SyntheticCounterProvider(idempotent=True, db_path=db)
+        # Simulează un worker care a murit după claim, înainte de submit:
+        # intrarea e SUBMITTED cu lease expirat, fără efect produs.
+        entry = store.get_or_create_intent(
+            TENANT, run, 0, provider=prov.name,
+            payload={"amount": 1},
+        )
+        store.claim_ledger_entry(
+            TENANT, entry["entry_id"], worker_id="w-dead", lease_s=0,
+        )
+        # Reclaim peste capul de 1 tentativă → reconciliere, nu reîncercare.
+        out = _work(prov)
+        assert out["outcomes"][0]["state"] == (
+            store.RUN_RECONCILIATION
+        )
+        assert prov.effect_count(TENANT) == 0  # niciun efect
+
+    def test_retry_backoff_delays_reclaim(self, db: Path) -> None:
+        """bo.exec.retry_backoff_s — o intrare a cărei lease a expirat
+        nu e revendicabilă înainte de lease+backoff."""
+        _enable()
+        m = _mandate()
+        run = _run(m)
+        prov = SyntheticCounterProvider(idempotent=True, db_path=db)
+        entry = store.get_or_create_intent(
+            TENANT, run, 0, provider=prov.name,
+            payload={"amount": 1},
+        )
+        store.claim_ledger_entry(
+            TENANT, entry["entry_id"], worker_id="w-dead", lease_s=0,
+        )
+        # Lease-ul a expirat deja, dar backoff-ul încă ține intrarea.
+        with pytest.raises(store.InvalidStateError):
+            store.claim_ledger_entry(
+                TENANT, entry["entry_id"], worker_id="w2", lease_s=1,
+                retry_backoff_s=2,
+            )
+        # Fără backoff, lease expirat → claim permis.
+        again = store.claim_ledger_entry(
+            TENANT, entry["entry_id"], worker_id="w2", lease_s=1,
+            retry_backoff_s=0,
+        )
+        assert again["attempts"] == 2
+
 
 # --------------------------------------------------------------------------- #
 # Execution — happy path, claims, leases, fencing
@@ -1217,13 +1284,158 @@ class TestGuardianLink:
         assert all("/v1/mandates/mnd_g1/status" in u for u in calls)
 
     def test_no_endpoint_means_local_only(self, db: Path) -> None:
-        """Endpoint unset → the Guardian check is a no-op; the local
-        chain remains the only authority (documented behavior)."""
+        """Endpoint unset + UNBOUND mandate → the Guardian check is a
+        no-op; the local chain remains the only authority (documented
+        standalone mode)."""
+        from openexecutive.bo.execution import guardian
+
+        _enable()
+        m = _mandate()  # no guardian_ref — standalone
+        guardian.assert_effect_authorized(TENANT, m)
+
+    def test_bound_mandate_no_endpoint_pauses(
+        self, db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A bound mandate cannot silently degrade to local-only: the
+        link is unverifiable → pause, not effect."""
         from openexecutive.bo.execution import guardian
 
         _enable()
         m = _mandate(guardian_ref="mnd_g1")
-        guardian.assert_effect_authorized(TENANT, m)
+        _run(m)
+        prov = SyntheticCounterProvider(idempotent=True, db_path=db)
+        out = _work(prov)
+        assert out["outcomes"][0]["state"] == store.RUN_PAUSED
+        assert out["outcomes"][0]["block_reason"] == "guardian_unavailable"
+        assert prov.effect_count(TENANT) == 0
+        with pytest.raises(guardian.GuardianUnavailableError):
+            guardian.assert_effect_authorized(TENANT, m)
+
+    def test_bound_mandate_no_token_pauses(
+        self, db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Bound mandate + missing credential — even with
+        auth_required=off — can never skip the check: pause."""
+        _enable()
+        self._link(required=False)  # endpoint set, NO token env
+        monkeypatch.delenv("BO_GUARDIAN_TOKEN", raising=False)
+        monkeypatch.delenv("BO_TELEMETRY_TOKEN", raising=False)
+        m = _mandate(guardian_ref="mnd_g1")
+        _run(m)
+        prov = SyntheticCounterProvider(idempotent=True, db_path=db)
+        out = _work(prov)
+        assert out["outcomes"][0]["state"] == store.RUN_PAUSED
+        assert prov.effect_count(TENANT) == 0
+
+    def test_policy_revoked_denies_effect(
+        self, db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Policy layer: mandate ACTIVE but the CURRENT policy revoked
+        → deny. The ACTIVE label alone is not authorization."""
+        from openexecutive.bo.execution import guardian
+
+        _enable()
+        self._link()
+        monkeypatch.setenv("BO_GUARDIAN_TOKEN", "tk")
+        monkeypatch.setenv("BO_GUARDIAN_POLICY_TOKEN", "ptk")
+
+        def fake(method: str, url: str, token: str, timeout: float,
+                 body_arg: Any = None) -> tuple[int, dict[str, Any]]:
+            if "/v1/exec-policies" in url:
+                return 200, {"exists": True, "revoked": True,
+                             "policy": {}}
+            return 200, {"status": "ACTIVE", "expiresAt": FUTURE}
+
+        monkeypatch.setattr(guardian, "_request", fake)
+        m = _mandate(guardian_ref="mnd_g1")
+        with pytest.raises(guardian.GuardianDeniedError) as ei:
+            guardian.assert_effect_authorized(TENANT, m)
+        assert ei.value.kind == "policy_revoked"
+
+    def test_policy_rights_reduced_denies_effect(
+        self, db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Policy narrowed after approval: the step's action is outside
+        the CURRENT allowedActions → deny (outside_policy)."""
+        from openexecutive.bo.execution import guardian
+
+        _enable()
+        self._link()
+        monkeypatch.setenv("BO_GUARDIAN_TOKEN", "tk")
+        monkeypatch.setenv("BO_GUARDIAN_POLICY_TOKEN", "ptk")
+
+        def fake(method: str, url: str, token: str, timeout: float,
+                 body_arg: Any = None) -> tuple[int, dict[str, Any]]:
+            if "/v1/exec-policies" in url:
+                return 200, {"exists": True, "revoked": False,
+                             "policy": {
+                                 "allowedActions": ["read"],
+                                 "allowedResources":
+                                     ["tool:catalog.read"]}}
+            return 200, {"status": "ACTIVE", "expiresAt": FUTURE}
+
+        monkeypatch.setattr(guardian, "_request", fake)
+        m = _mandate(guardian_ref="mnd_g1")
+        with pytest.raises(guardian.GuardianDeniedError) as ei:
+            guardian.assert_effect_authorized(
+                TENANT, m, step_action="effect.intent",
+                step_resource="tool:counter.increment")
+        assert ei.value.kind == "outside_policy"
+
+    def test_policy_rights_ok_allows_effect(
+        self, db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from openexecutive.bo.execution import guardian
+
+        _enable()
+        self._link()
+        monkeypatch.setenv("BO_GUARDIAN_TOKEN", "tk")
+        monkeypatch.setenv("BO_GUARDIAN_POLICY_TOKEN", "ptk")
+
+        def fake(method: str, url: str, token: str, timeout: float,
+                 body_arg: Any = None) -> tuple[int, dict[str, Any]]:
+            if "/v1/exec-policies" in url:
+                return 200, {"exists": True, "revoked": False,
+                             "policy": {
+                                 "allowedActions": ["effect.intent"],
+                                 "allowedResources":
+                                     ["tool:counter.increment"]}}
+            return 200, {"status": "ACTIVE", "expiresAt": FUTURE}
+
+        monkeypatch.setattr(guardian, "_request", fake)
+        m = _mandate(guardian_ref="mnd_g1")
+        guardian.assert_effect_authorized(
+            TENANT, m, step_action="effect.intent",
+            step_resource="tool:counter.increment")  # no raise
+
+    def test_policy_credential_refused_pauses(
+        self, db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A provisioned-but-refused policy credential means the rights
+        cannot be verified → pause (unavailable), never proceed."""
+        import io
+        import urllib.error
+
+        from openexecutive.bo.execution import guardian
+
+        _enable()
+        self._link()
+        monkeypatch.setenv("BO_GUARDIAN_TOKEN", "tk")
+        monkeypatch.setenv("BO_GUARDIAN_POLICY_TOKEN", "ptk")
+
+        def fake(method: str, url: str, token: str, timeout: float,
+                 body_arg: Any = None) -> tuple[int, dict[str, Any]]:
+            if "/v1/exec-policies" in url:
+                raise urllib.error.HTTPError(
+                    url, 403, "denied", {},
+                    io.BytesIO(b'{"detail":"missing_scope"}'))
+            return 200, {"status": "ACTIVE", "expiresAt": FUTURE}
+
+        monkeypatch.setattr(guardian, "_request", fake)
+        m = _mandate(guardian_ref="mnd_g1")
+        with pytest.raises(guardian.GuardianUnavailableError):
+            guardian.assert_effect_authorized(
+                TENANT, m, step_action="effect.intent")
 
 
 # --------------------------------------------------------------------------- #
@@ -1354,6 +1566,142 @@ class TestRoutes:
                                "budget_amount": "1",
                            })
         assert resp.status_code == 409
+
+    def test_cancel_requires_reason(self, client) -> None:
+        """Consequential op: cancel without an audited reason → 4xx."""
+        self._enable(client)
+        m = self._mandate(client)
+        run = client.post("/bo/execution/runs", headers=self.ADMIN,
+                          json={"mandate_id": m["mandate_id"],
+                                "steps": [_step()],
+                                "budget_amount": "1"}).json()["run"]
+        resp = client.post(f"/bo/execution/runs/{run['run_id']}/cancel",
+                           headers=self.ADMIN, json={})
+        assert resp.status_code == 422
+        resp = client.post(f"/bo/execution/runs/{run['run_id']}/cancel",
+                           headers=self.ADMIN,
+                           json={"reason": "opresc proba"})
+        assert resp.status_code == 200
+        assert resp.json()["run"]["cancel_requested"] is True
+
+    def test_authority_endpoint_standalone(self, client) -> None:
+        """verify-authority on an unbound mandate → standalone, allowed
+        locally — and the response exposes the link state."""
+        self._enable(client)
+        m = self._mandate(client)
+        run = client.post("/bo/execution/runs", headers=self.ADMIN,
+                          json={"mandate_id": m["mandate_id"],
+                                "steps": [_step()],
+                                "budget_amount": "1"}).json()["run"]
+        resp = client.get(
+            f"/bo/execution/runs/{run['run_id']}/authority",
+            headers=self.VIEWER)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["authorized"] is True
+        assert body["mode"] == "standalone"
+        assert body["guardian"]["bound_ref"] is None
+
+    def test_authority_endpoint_bound_unverifiable(
+        self, client, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Bound mandate + endpoint set + credential missing → the
+        authority answer is 'unavailable', never silently allowed."""
+        self._enable(client)
+        resp = client.put(
+            "/bo/settings/bo.exec.guardian_endpoint", headers=self.ADMIN,
+            json={"value": "http://guardian.test",
+                  "expected_version": 0})
+        assert resp.status_code == 200
+        monkeypatch.delenv("BO_GUARDIAN_TOKEN", raising=False)
+        monkeypatch.delenv("BO_TELEMETRY_TOKEN", raising=False)
+        resp = client.post("/bo/execution/mandates", headers=self.ADMIN,
+                           json={
+                               "guardian_ref": "mnd_x",
+                               "allowed_resources": ["synth.*"],
+                               "allowed_actions": ["increment"],
+                               "budget_limit": "10",
+                               "concurrency_limit": 2,
+                               "max_steps": 10, "max_depth": 1,
+                               "expires_at": FUTURE,
+                           })
+        m = resp.json()["mandate"]
+        assert m["guardian_ref"] == "mnd_x"
+        run = client.post("/bo/execution/runs", headers=self.ADMIN,
+                          json={"mandate_id": m["mandate_id"],
+                                "steps": [_step()],
+                                "budget_amount": "1"}).json()["run"]
+        resp = client.get(
+            f"/bo/execution/runs/{run['run_id']}/authority",
+            headers=self.VIEWER)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["authorized"] is False
+        assert body["mode"] == "unavailable"
+        assert body["guardian"]["bound_ref"] == "mnd_x"
+        assert body["guardian"]["credential_configured"] is False
+
+    def test_status_exposes_guardian_summary(self, client) -> None:
+        resp = client.get("/bo/execution/status", headers=self.VIEWER)
+        assert resp.status_code == 200
+        g = resp.json()["guardian"]
+        assert set(g) >= {"endpoint_configured", "credential_configured",
+                          "auth_required", "policy_layer"}
+
+    def test_outbox_list_and_retry_rules(self, client) -> None:
+        """Dead-letter inspectable + retry autorizat-sigur: doar dead,
+        cu motiv; pending/livrate nu se ating; viewerul e respins."""
+        from openexecutive.bo.routing import store as routing_store
+
+        self._enable(client)
+        routing_store.enqueue_outbox(
+            "tenant-a", "execution", None,
+            {"schemaVersion": "bo.execution-control.event.v1",
+             "eventId": "ev-dead", "eventType": "receipt"},
+        )
+        routing_store.resolve_outbox(
+            "tenant-a", "ev-dead", error="HTTP 422: schema",
+            dead=True,
+        )
+        routing_store.enqueue_outbox(
+            "tenant-a", "execution", None,
+            {"schemaVersion": "bo.execution-control.event.v1",
+             "eventId": "ev-pending", "eventType": "checkpoint"},
+        )
+        resp = client.get("/bo/execution/outbox", headers=self.VIEWER)
+        assert resp.status_code == 200
+        entries = {e["event_id"]: e for e in resp.json()["entries"]}
+        assert entries["ev-dead"]["delivered"] == 2
+        assert entries["ev-dead"]["last_error"].startswith("HTTP 422")
+        assert entries["ev-dead"]["envelope"]["eventId"] == "ev-dead"
+        assert entries["ev-pending"]["delivered"] == 0
+        # Retry fără motiv → 422; fără drept → 403.
+        resp = client.post(
+            "/bo/execution/outbox/ev-dead/retry",
+            headers=self.ADMIN, json={})
+        assert resp.status_code == 422
+        resp = client.post(
+            "/bo/execution/outbox/ev-dead/retry",
+            headers=self.VIEWER, json={"reason": "x"})
+        assert resp.status_code == 403
+        # Pending nu se reia manual — e în zbor.
+        resp = client.post(
+            "/bo/execution/outbox/ev-pending/retry",
+            headers=self.ADMIN, json={"reason": "x"})
+        assert resp.status_code == 409
+        # Dead-letter → requeue autorizat.
+        resp = client.post(
+            "/bo/execution/outbox/ev-dead/retry",
+            headers=self.ADMIN,
+            json={"reason": "receptorul a fost reparat"})
+        assert resp.status_code == 200
+        entries = {
+            e["event_id"]: e
+            for e in client.get(
+                "/bo/execution/outbox", headers=self.VIEWER
+            ).json()["entries"]
+        }
+        assert entries["ev-dead"]["delivered"] == 0
 
 
 # --------------------------------------------------------------------------- #

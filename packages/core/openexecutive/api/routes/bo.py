@@ -567,6 +567,31 @@ class _ReconcileBody(BaseModel):
     resolution: str = Field(pattern="^(receipt|mark_failed)$")
 
 
+class _FlagBody(BaseModel):
+    reason: str | None = Field(default=None, max_length=300)
+
+
+def _guardian_summary(tenant: str, mandate: Any | None = None) -> dict[str, Any]:
+    """Effective-authority surface for operators — booleans only, never
+    credentials. `bound_ref` is the explicit Guardian link the mandate
+    was created with (stable across restarts)."""
+    from openexecutive.bo.execution import guardian as exec_guardian
+
+    endpoint, token, _t, required = exec_guardian._link_config(
+        tenant, None
+    )
+    return {
+        "bound_ref": getattr(mandate, "guardian_ref", None)
+        if mandate is not None else None,
+        "endpoint_configured": bool(endpoint),
+        "credential_configured": bool(token),
+        "auth_required": required,
+        "policy_layer": bool(
+            exec_guardian._policy_token(tenant, None)
+        ),
+    }
+
+
 def _mandate_json(m: Any) -> dict[str, Any]:
     from openexecutive.bo.execution.mandate import mandate_state
 
@@ -705,29 +730,41 @@ def get_run_detail(run_id: str, ident: BoIdentity) -> Any:
         "checkpoints": exec_store.list_checkpoints(tenant, run_id),
         "ledger": exec_store.list_ledger(tenant, run_id),
         "reservation": exec_store.reservation_for(tenant, run_id),
+        "guardian": _guardian_summary(tenant, mandate),
         "limits_note": "exactly-once nu e promis pentru provideri fără "
         "idempotență/receipt — stările UNKNOWN cer reconciliere",
     }
 
 
 @router.post("/execution/runs/{run_id}/pause")
-def pause_run(run_id: str, ident: BoIdentity) -> Any:
+def pause_run(
+    run_id: str, ident: BoIdentity, body: _FlagBody | None = None,
+) -> Any:
     bo_identity.require(ident, "execution:write")
     return {
         "run": exec_store.request_flag(
-            ident.tenant, run_id, "pause_requested", actor=ident.actor
+            ident.tenant, run_id, "pause_requested", actor=ident.actor,
+            reason=body.reason if body else None,
         )
     }
 
 
 @router.post("/execution/runs/{run_id}/cancel")
-def cancel_run(run_id: str, ident: BoIdentity) -> Any:
+def cancel_run(
+    run_id: str, ident: BoIdentity, body: _FlagBody | None = None,
+) -> Any:
     """Request cancellation — honored at the next step boundary. An
-    already-executed external effect is NOT reversed (UI states this)."""
+    already-executed external effect is NOT reversed (UI states this).
+    The reason is mandatory for the audit trail of a consequential op."""
     bo_identity.require(ident, "execution:write")
+    if not body or not body.reason:
+        raise MandateValidationError(
+            "anularea cere un motiv — operație consecvențială auditată"
+        )
     return {
         "run": exec_store.request_flag(
-            ident.tenant, run_id, "cancel_requested", actor=ident.actor
+            ident.tenant, run_id, "cancel_requested", actor=ident.actor,
+            reason=body.reason,
         )
     }
 
@@ -756,6 +793,92 @@ def reconcile_run(
     return exec_engine.reconcile_run(
         ident.tenant, run_id, provider,
         resolution=body.resolution, actor=ident.actor,
+    )
+
+
+@router.get("/execution/runs/{run_id}/authority")
+def run_authority(run_id: str, ident: BoIdentity) -> Any:
+    """Live effective-authority check for the run's mandate — the same
+    evaluation the engine performs at the effect boundary. Read-only:
+    it changes nothing, it answers "would the effect be allowed NOW?"
+    and exposes the exact blocking reason for operators."""
+    from openexecutive.bo.execution import guardian as exec_guardian
+
+    bo_identity.require(ident, "execution:read")
+    tenant = ident.tenant
+    run = exec_store.get_run(tenant, run_id)
+    mandate = exec_store.get_mandate(tenant, run["mandate_id"])
+    step = (
+        run["steps"][run["current_step"]]
+        if run["current_step"] < len(run["steps"])
+        else None
+    )
+    summary = _guardian_summary(tenant, mandate)
+    try:
+        exec_guardian.assert_effect_authorized(
+            tenant, mandate,
+            step_action=step.get("action") if step else None,
+            step_resource=step.get("resource") if step else None,
+        )
+    except exec_guardian.GuardianDeniedError as exc:
+        return {
+            "authorized": False, "mode": "denied",
+            "kind": f"guardian_{exc.kind}", "detail": str(exc),
+            "guardian": summary,
+        }
+    except exec_guardian.GuardianUnavailableError as exc:
+        return {
+            "authorized": False, "mode": "unavailable",
+            "kind": "guardian_unavailable", "detail": str(exc),
+            "guardian": summary,
+        }
+    return {
+        "authorized": True,
+        "mode": "guardian" if summary["bound_ref"] else "standalone",
+        "kind": None, "detail": None,
+        "guardian": summary,
+    }
+
+
+@router.get("/execution/outbox")
+def list_exec_outbox(
+    ident: BoIdentity,
+    delivered: int | None = None,
+    limit: int = 100,
+) -> Any:
+    """Inspectable outbox: pending + dead-lettered execution (and
+    telemetry) envelopes with errors, attempts and the exact persisted
+    payload — the conflict/422 detail stays visible, never dropped."""
+    bo_identity.require(ident, "execution:read")
+    from openexecutive.bo.routing import store as routing_store
+
+    return {
+        "entries": routing_store.list_outbox(
+            ident.tenant,
+            delivered=delivered if delivered in (0, 1, 2) else None,
+            limit=min(max(limit, 1), 500),
+        ),
+        "stats": routing_store.outbox_stats(ident.tenant),
+    }
+
+
+class _RetryBody(BaseModel):
+    reason: str = Field(min_length=1, max_length=300)
+
+
+@router.post("/execution/outbox/{event_id}/retry")
+def retry_outbox(
+    event_id: str, body: _RetryBody, ident: BoIdentity
+) -> Any:
+    """Authorized requeue of a DEAD-lettered envelope — the only safe
+    retry: pending entries are in-flight, delivered ones are done. The
+    persisted bytes are re-sent unchanged (receiver dedups by eventId).
+    Reason is mandatory — consequential, audited."""
+    bo_identity.require(ident, "execution:write")
+    from openexecutive.bo.routing import store as routing_store
+
+    return routing_store.retry_outbox_entry(
+        ident.tenant, event_id, reason=body.reason, actor=ident.actor,
     )
 
 
@@ -791,6 +914,7 @@ def execution_status(ident: BoIdentity) -> Any:
         "runs_total": len(runs),
         "by_state": by_state,
         "synthetic_effect_total": provider.total(tenant),
+        "guardian": _guardian_summary(tenant),
         "limits": {
             "max_delegation_depth": settings_store.get_effective_value(
                 tenant, "bo.exec.max_delegation_depth"

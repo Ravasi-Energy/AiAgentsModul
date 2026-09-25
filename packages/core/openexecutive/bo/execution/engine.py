@@ -88,6 +88,20 @@ def submit_execution(
         from openexecutive.bo.execution.mandate import MandateValidationError
 
         raise MandateValidationError("budget_amount: valoare invalidă")
+    cap_raw = str(
+        _setting(tenant, "bo.exec.budget_cap", "", db_path)
+    ).strip()
+    if cap_raw:
+        cap_amount = Decimal(cap_raw.split()[0])
+        if budget_amount > cap_amount:
+            from openexecutive.bo.execution.mandate import (
+                MandateValidationError,
+            )
+
+            raise MandateValidationError(
+                f"budget_amount {budget_amount} depășește plafonul "
+                f"tenantului ({cap_raw})"
+            )
     mandate = store.get_mandate(tenant, mandate_id, db_path=db_path)
     # The whole chain must be active at submission too (not only per step).
     try:
@@ -233,9 +247,13 @@ def execute_run(
                 block = f"{reason}: {exc}"
             else:
                 from openexecutive.bo.execution import guardian
+                step_def = fresh["steps"][step_idx]
                 try:
                     guardian.assert_effect_authorized(
-                        tenant, mandate, db_path=db_path
+                        tenant, mandate,
+                        step_action=step_def.get("action"),
+                        step_resource=step_def.get("resource"),
+                        db_path=db_path,
                     )
                 except guardian.GuardianUnavailableError as exc:
                     # Mandatory dependency down — pause, don't fail: the
@@ -444,12 +462,29 @@ def _execute_step(
                 f"provider fără idempotență — reconciliere necesară",
             }
         # Idempotent provider: safe to re-claim and retry — the provider
-        # deduplicates by key.
+        # deduplicates by key. The attempt cap still applies: past it the
+        # entry stops being auto-reclaimed and needs reconciliation.
+        max_attempts = int(
+            _setting(tenant, "bo.exec.max_effect_attempts", 3, db_path)
+        )
+        if int(entry["attempts"]) >= max_attempts:
+            store.mark_ledger_status(
+                tenant, entry["entry_id"], store.LED_RECONCILIATION,
+                db_path=db_path,
+            )
+            return {
+                "terminal": store.RUN_RECONCILIATION,
+                "block_reason": f"step {step}: pragul de tentative "
+                f"({max_attempts}) a fost atins — reconciliere necesară",
+            }
 
+    backoff_s = int(
+        _setting(tenant, "bo.exec.retry_backoff_s", 0, db_path)
+    )
     try:
         entry = store.claim_ledger_entry(
             tenant, entry["entry_id"], worker_id=worker_id,
-            lease_s=lease_s, db_path=db_path,
+            lease_s=lease_s, retry_backoff_s=backoff_s, db_path=db_path,
         )
     except store.InvalidStateError:
         # Someone else owns it (active lease) — stop without touching.

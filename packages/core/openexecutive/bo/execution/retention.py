@@ -41,6 +41,10 @@ def sweep(
     finished = (
         store.RUN_SUCCEEDED, store.RUN_FAILED, store.RUN_CANCELLED,
     )
+    unresolved = (
+        store.LED_INTENT, store.LED_SUBMITTED,
+        store.LED_UNKNOWN, store.LED_RECONCILIATION,
+    )
     with get_conn(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
         rows = conn.execute(
@@ -49,7 +53,18 @@ def sweep(
             "AND finished_at < ?",
             (tenant, *finished, cutoff),
         ).fetchall()
-        ids = [r["run_id"] for r in rows]
+        # Retenția nu atinge intențiile nerezolvate: o rulare terminată
+        # dar cu ledger INTENT/SUBMITTED/UNKNOWN/RECONCILIATION păstrează
+        # dovada până la reconcilierea explicită.
+        ids = []
+        for r in rows:
+            open_ledger = conn.execute(
+                "SELECT 1 FROM bo_effect_ledger WHERE tenant = ? "
+                "AND run_id = ? AND status IN (?, ?, ?, ?) LIMIT 1",
+                (tenant, r["run_id"], *unresolved),
+            ).fetchone()
+            if open_ledger is None:
+                ids.append(r["run_id"])
         for run_id in ids:
             for table in (
                 "bo_checkpoints", "bo_effect_ledger",

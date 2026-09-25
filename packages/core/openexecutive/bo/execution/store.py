@@ -773,10 +773,12 @@ def request_flag(
     flag: str,
     *,
     actor: str,
+    reason: str | None = None,
     db_path: Path | None = None,
 ) -> dict[str, Any]:
     """Set pause/cancel — honored at the next step boundary, never
-    retroactively on an already-executed effect."""
+    retroactively on an already-executed effect. The operator's reason
+    is captured in the audit trail (consequential operation)."""
     if flag not in ("pause_requested", "cancel_requested"):
         raise InvalidStateError(flag)
     with get_conn(db_path) as conn:
@@ -798,6 +800,7 @@ def request_flag(
         )
     _audit(tenant, f"bo_run_{flag.removesuffix('_requested')}", {
         "run_id": run_id,
+        "reason": (reason or "")[:300] or None,
     }, actor=actor)
     return get_run(tenant, run_id, db_path=db_path)
 
@@ -1009,15 +1012,21 @@ def claim_ledger_entry(
     *,
     worker_id: str,
     lease_s: int,
+    retry_backoff_s: int = 0,
     db_path: Path | None = None,
 ) -> dict[str, Any]:
     """Claim a ledger entry for execution: bumps ``fence_version`` and
     sets the lease. Claimable = INTENT, or SUBMITTED/UNKNOWN whose lease
     expired (crashed worker — the reclaimer must then do a receipt lookup
     before re-submitting; that decision belongs to the engine). A
-    SUCCEEDED/FAILED/RECONCILIATION entry is never re-executed."""
-    now = _now()
-    until = (datetime.now(UTC) + timedelta(seconds=lease_s)).isoformat(
+    SUCCEEDED/FAILED/RECONCILIATION entry is never re-executed.
+
+    ``retry_backoff_s`` adds a floor after lease expiry: a stale
+    SUBMITTED/UNKNOWN entry is claimable only once
+    ``lease_until + backoff`` has passed — retries cannot spin tighter
+    than the configured backoff."""
+    now_dt = datetime.now(UTC)
+    until = (now_dt + timedelta(seconds=lease_s)).isoformat(
         timespec="milliseconds"
     ).replace("+00:00", "Z")
     with get_conn(db_path) as conn:
@@ -1029,10 +1038,20 @@ def claim_ledger_entry(
         ).fetchone()
         if row is None:
             raise NotFoundError(entry_id)
-        claimable = row["status"] == LED_INTENT or (
-            row["status"] in (LED_SUBMITTED, LED_UNKNOWN)
-            and (row["lease_until"] is None or row["lease_until"] < now)
-        )
+        claimable = row["status"] == LED_INTENT
+        if not claimable and row["status"] in (LED_SUBMITTED, LED_UNKNOWN):
+            if row["lease_until"] is None:
+                claimable = True
+            else:
+                try:
+                    lease_end = datetime.fromisoformat(
+                        str(row["lease_until"]).replace("Z", "+00:00")
+                    )
+                except ValueError:
+                    lease_end = now_dt  # corrupt lease → treat as expired
+                claimable = now_dt >= lease_end + timedelta(
+                    seconds=max(0, retry_backoff_s)
+                )
         if not claimable:
             raise InvalidStateError(
                 f"intrarea {entry_id} este {row['status']}, nu poate fi revendicată"

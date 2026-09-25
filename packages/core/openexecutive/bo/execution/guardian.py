@@ -63,7 +63,9 @@ class GuardianDeniedError(Exception):
     """Guardian refused the effect — permanent until the mandate changes.
 
     ``kind``: ``revoked`` | ``expired`` | ``not_found`` | ``forbidden`` |
-    ``misconfigured`` | ``unbound`` | ``not_active``."""
+    ``misconfigured`` | ``unbound`` | ``not_active`` |
+    ``invalid_response`` | ``policy_revoked`` | ``policy_missing`` |
+    ``outside_policy``."""
 
     def __init__(self, kind: str, message: str) -> None:
         super().__init__(message)
@@ -127,6 +129,20 @@ def _link_config(
     return endpoint, token, timeout_s, required
 
 
+def _policy_token(tenant: str, db_path: Path | None) -> str | None:
+    """Optional credential with ``execpolicy:read`` for the
+    effective-rights layer (current Guardian policy). A producer normally
+    holds only ``execobs:write`` — the policy credential is provisioned
+    separately; without it the layer is skipped (documented limit)."""
+    ref = str(
+        _setting(
+            tenant, "bo.exec.guardian_policy_secret_ref",
+            "BO_GUARDIAN_POLICY_TOKEN", db_path,
+        )
+    )
+    return os.environ.get(ref) or None
+
+
 def _request(
     method: str, url: str, token: str, timeout_s: float,
     body: dict[str, Any] | None = None,
@@ -166,20 +182,42 @@ def _error_detail(exc: urllib.error.HTTPError) -> str:
 # --------------------------------------------------------------------------- #
 
 def assert_effect_authorized(
-    tenant: str, mandate: Any, *, db_path: Path | None = None
+    tenant: str, mandate: Any, *,
+    step_action: str | None = None,
+    step_resource: str | None = None,
+    db_path: Path | None = None,
 ) -> None:
     """Re-check the Guardian-held mandate status NOW, at the effect
-    boundary. Returns silently when the link is not configured; raises
-    ``GuardianDeniedError``/``GuardianUnavailableError`` otherwise.
+    boundary. Returns silently only for standalone (unbound) mandates
+    with the link not configured; raises ``GuardianDeniedError``/
+    ``GuardianUnavailableError`` otherwise.
+
+    A BOUND mandate (``guardian_ref`` set) can never silently downgrade
+    to local-only control: without an endpoint or credential the
+    verification is impossible → ``GuardianUnavailableError`` (the run
+    PAUSES — recoverable once the operator restores the link). A setting
+    change cannot turn a bound execution's authorization optional.
+
+    When a policy credential (``bo.exec.guardian_policy_secret_ref``,
+    ``execpolicy:read`` scope) is provisioned, a second layer verifies
+    the EFFECTIVE rights against the CURRENT Guardian policy — not just
+    the ACTIVE label: a revoked policy denies, and the step's
+    action/resource must still sit inside ``allowedActions``/
+    ``allowedResources`` (rights reduced after approval are caught).
 
     Guardian holds the distributed revocation — the local mandate row
     only proves the chain BOAgents issued; a mandate revoked centrally
     must stop effects even while the local row still looks active.
     """
     endpoint, token, timeout_s, required = _link_config(tenant, db_path)
-    if not endpoint:
-        return  # link not configured — local chain only (documented)
     guardian_ref = getattr(mandate, "guardian_ref", None)
+    if not endpoint:
+        if guardian_ref or required:
+            raise GuardianUnavailableError(
+                "endpoint Guardian neconfigurat — mandatul legat nu "
+                "poate fi verificat"
+            )
+        return  # standalone — local chain only (documented mode)
     if not guardian_ref:
         if required:
             raise GuardianDeniedError(
@@ -189,16 +227,12 @@ def assert_effect_authorized(
             )
         return
     if not token:
-        if required:
-            raise GuardianDeniedError(
-                "misconfigured",
-                "secretul Guardian nu este setat în mediul procesului",
-            )
-        logger.warning(
-            "guardian: endpoint configurat dar tokenul lipsește — "
-            "verificarea la frontieră se sare (auth_required=off)"
+        # Bound mandate, missing credential — the check cannot run, so
+        # the effect must NOT run. Pause (recoverable), never skip.
+        raise GuardianUnavailableError(
+            "credențialul Guardian lipsește — verificarea la frontieră "
+            "e obligatorie pentru mandate legate"
         )
-        return
     url = f"{endpoint}/v1/mandates/{guardian_ref}/status"
     try:
         status, body = _request("GET", url, token, timeout_s)
@@ -220,6 +254,12 @@ def assert_effect_authorized(
         ) from exc
     except Exception as exc:  # noqa: BLE001 — DNS/connect/timeout/TLS
         raise GuardianUnavailableError(str(exc)[:200]) from exc
+    if "status" not in body:
+        raise GuardianDeniedError(
+            "invalid_response",
+            f"răspuns invalid de la autoritate pentru "
+            f"{guardian_ref} (câmpul status lipsește)",
+        )
     mandate_status = str(body.get("status") or "")
     if mandate_status == "REVOKED":
         raise GuardianDeniedError(
@@ -244,6 +284,88 @@ def assert_effect_authorized(
             f"mandatul {guardian_ref} are starea "
             f"{mandate_status or 'lipsă'} în Guardian",
         )
+    _assert_policy_rights(
+        tenant, endpoint, timeout_s,
+        step_action=step_action, step_resource=step_resource,
+        db_path=db_path,
+    )
+
+
+def _assert_policy_rights(
+    tenant: str, endpoint: str, timeout_s: float, *,
+    step_action: str | None, step_resource: str | None,
+    db_path: Path | None,
+) -> None:
+    """Second boundary layer: the CURRENT Guardian policy, when an
+    ``execpolicy:read`` credential is provisioned. A policy revoked or
+    narrowed after the mandate was issued must still stop the effect —
+    the ACTIVE label on a mandate does not prove the policy still
+    allows it.
+
+    Credential missing → layer skipped (documented limit, needs a
+    separately-provisioned scope). Credential present but refused → the
+    rights cannot be verified → pause (unavailable), not proceed."""
+    token = _policy_token(tenant, db_path)
+    if not token:
+        return
+    url = f"{endpoint}/v1/exec-policies?tenant={tenant}"
+    try:
+        status, body = _request("GET", url, token, timeout_s)
+    except urllib.error.HTTPError as exc:
+        detail = _error_detail(exc)
+        if exc.code >= 500 or detail in _RECEIVER_OFF_DETAILS:
+            raise GuardianUnavailableError(
+                f"HTTP {exc.code}: {detail}"
+            ) from exc
+        # Credential provisioned but refused — rights unverifiable.
+        raise GuardianUnavailableError(
+            f"credențialul de politică a fost refuzat "
+            f"(HTTP {exc.code}: {detail}) — drepturile efective nu pot "
+            f"fi verificate"
+        ) from exc
+    except Exception as exc:  # noqa: BLE001 — network/timeout/TLS
+        raise GuardianUnavailableError(str(exc)[:200]) from exc
+    if not isinstance(body, dict) or "exists" not in body:
+        raise GuardianDeniedError(
+            "invalid_response",
+            "răspuns invalid de la /v1/exec-policies — drepturile "
+            "efective nu pot fi stabilite",
+        )
+    if body.get("revoked"):
+        raise GuardianDeniedError(
+            "policy_revoked",
+            "politica Guardian curentă este revocată — mandatul ACTIVE "
+            "nu mai autorizează efecte",
+        )
+    if not body.get("exists"):
+        raise GuardianDeniedError(
+            "policy_missing",
+            "nu există o politică Guardian curentă pentru tenant",
+        )
+    policy = body.get("policy") or {}
+    allowed_actions = set(policy.get("allowedActions") or [])
+    allowed_resources = set(policy.get("allowedResources") or [])
+    if step_action is not None and step_action not in allowed_actions:
+        raise GuardianDeniedError(
+            "outside_policy",
+            f"acțiunea {step_action!r} nu e în politica Guardian curentă",
+        )
+    if step_resource is not None and not any(
+        _resource_covered(step_resource, r) for r in allowed_resources
+    ):
+        raise GuardianDeniedError(
+            "outside_policy",
+            f"resursa {step_resource!r} nu e în politica Guardian curentă",
+        )
+
+
+def _resource_covered(resource: str, allowed: str) -> bool:
+    """Exact match or ``prefix.*`` wildcard — the same convention as the
+    local mandate check (`store._resource_allowed`)."""
+    if allowed.endswith(".*"):
+        return resource == allowed[:-2] or resource.startswith(
+            allowed[:-1])
+    return resource == allowed
 
 
 # --------------------------------------------------------------------------- #
