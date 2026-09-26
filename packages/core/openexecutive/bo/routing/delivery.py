@@ -95,6 +95,9 @@ def deliver_pending(
             ack: dict[str, Any] | None
             if row["kind"] == "execution":
                 ack = _deliver_execution(tenant, row, db_path)
+            elif row["kind"] in ("service", "pilot-telemetry"):
+                from openexecutive.bo.pilot.delivery import deliver
+                ack = deliver(tenant, row["envelope"], db_path)
             else:
                 ack = adapter.deliver_event(row["envelope"])
         except TelemetryDisabledError:

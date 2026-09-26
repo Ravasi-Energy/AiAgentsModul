@@ -131,6 +131,36 @@ def _identity(request: Request) -> bo_identity.Identity:
 BoIdentity = Annotated[bo_identity.Identity, Depends(_identity)]
 
 
+class _PilotActivation(BaseModel):
+    import_id: str = Field(min_length=1, max_length=80)
+    active: bool
+    expected_version: int = Field(ge=0)
+    reason: str = Field(min_length=3, max_length=300)
+
+
+class _PilotRun(BaseModel):
+    mandate_id: str = Field(min_length=1, max_length=80)
+    correlation_id: str | None = Field(default=None, max_length=80)
+
+
+@router.get("/pilot")
+def pilot_status(ident: BoIdentity) -> Any:
+    from openexecutive.bo.pilot.service import status
+    return status(ident)
+
+
+@router.put("/pilot/activation")
+def pilot_activation(body: _PilotActivation, ident: BoIdentity) -> Any:
+    from openexecutive.bo.pilot.service import change_activation
+    return change_activation(ident, **body.model_dump())
+
+
+@router.post("/pilot/runs", status_code=201)
+def pilot_run(body: _PilotRun, ident: BoIdentity) -> Any:
+    from openexecutive.bo.pilot.service import submit
+    return submit(ident, **body.model_dump())
+
+
 class _SettingPatch(BaseModel):
     value: Any
     expected_version: int = Field(ge=0)

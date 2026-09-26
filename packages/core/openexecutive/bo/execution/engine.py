@@ -445,6 +445,11 @@ def _execute_step(
     if fresh["pause_requested"] or not enabled(tenant, db_path=db_path):
         return {"terminal": store.RUN_PAUSED, "block_reason": "execution_disabled_or_paused"}
     step_desc = run["steps"][step]
+    if step_desc.get("resource") == "synth.erp":
+        from openexecutive.bo.pilot.provider import PilotProvider
+        if len(run["steps"]) != 1 or step_desc.get("action") != "diagnose":
+            return {"terminal": store.RUN_FAILED, "block_reason": "plan diagnostic invalid"}
+        provider = PilotProvider(tenant, run, db_path)
     payload = step_desc.get("payload", {})
     try:
         entry = store.get_or_create_intent(
@@ -488,7 +493,7 @@ def _execute_step(
                 "terminal": None, "ledger_status": store.LED_SUCCEEDED,
                 "receipt_ref": receipt["receipt_ref"],
             }
-        if not provider.idempotent:
+        if not provider.idempotent or not getattr(provider, "retry_unknown", True):
             # Ambiguous external state + no dedup guarantee: a retry could
             # double the effect. Surface it, don't guess.
             store.mark_ledger_status(
@@ -663,6 +668,11 @@ def reconcile_run(
     ]
     resolved = pending = 0
     for entry in entries:
+        if entry["provider"] == "synth.erp":
+            from openexecutive.bo.pilot.provider import PilotProvider
+            provider = PilotProvider(tenant, store.get_run(tenant, run_id, db_path=db_path), db_path)
+            if resolution != "receipt":
+                raise store.InvalidStateError("Pilot UNKNOWN cere readback corelat; fără retrimitere oarbă")
         if resolution == "receipt":
             receipt = provider.receipt_for(
                 tenant=tenant, idempotency_key=entry["idempotency_key"],
