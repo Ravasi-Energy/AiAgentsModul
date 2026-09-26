@@ -226,6 +226,21 @@ def test_service_outage_unknown_and_pending_cancel_pause_no_effect(pilot):
     assert pilot["call"]("/stats")["effectCount"] == 0
 
 
+def test_telemetry_outage_does_not_veto_correlated_receipt(pilot, monkeypatch):
+    import sqlite3
+
+    from openexecutive.bo.routing import store as outbox
+    def unavailable(*args, **kwargs):
+        raise sqlite3.OperationalError("synthetic telemetry outbox unavailable")
+    monkeypatch.setattr(outbox, "enqueue_outbox", unavailable)
+    result = run(pilot)
+    assert result["state"] == "SUCCEEDED"
+    entry = store.list_ledger("tenant-a", result["run_id"])[0]
+    assert entry["status"] == "SUCCEEDED" and entry["receipt_ref"]
+    assert entry["receipt"]["telemetryStatus"] == "DEGRADED"
+    assert pilot["call"]("/stats") == {"effectCount": 1, "submitCalls": 1}
+
+
 def test_telemetry_loss_does_not_relax_or_gate_standalone_authority(pilot, monkeypatch):
     from openexecutive.bo.pilot import delivery
     from openexecutive.bo.routing import store as outbox

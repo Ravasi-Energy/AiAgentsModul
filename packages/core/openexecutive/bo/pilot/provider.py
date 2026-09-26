@@ -1,5 +1,6 @@
 """Bounded HTTP diagnostic; the service is synthetic and explicitly allowlisted."""
 import json
+import logging
 import os
 import re
 from datetime import UTC, datetime
@@ -12,6 +13,8 @@ from openexecutive.bo.execution import store
 from openexecutive.bo.execution.synth import ProviderError, ProviderTimeout
 from openexecutive.bo.pilot import service
 from openexecutive.bo.routing import store as outbox
+
+logger = logging.getLogger(__name__)
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -70,9 +73,18 @@ class PilotProvider:
 
     def _accept(self, response, key, digest):
         # No raw service payload enters logs, UI or the shared outbox.
+        # Telemetry is evidence-adjacent, never the proof of effect: an
+        # observation that fails to validate or persist is reported as
+        # degraded telemetry, not as a lost answer — the correlated
+        # receipt remains authoritative and the effect is not retried.
         observation = response.get("observation") if isinstance(response, dict) else None
+        telemetry_degraded = False
         if observation:
-            self._observation(observation)
+            try:
+                self._observation(observation)
+            except Exception:  # noqa: BLE001 — telemetry must not veto the receipt
+                telemetry_degraded = True
+                logger.warning("observația pilot nu a putut fi consumată/persistată", exc_info=True)
         receipt = response.get("receipt") if isinstance(response, dict) else None
         if not isinstance(receipt, dict) or receipt.get("tenant") != self.tenant \
                 or receipt.get("effect_key") != key or receipt.get("digest") != digest \
@@ -85,7 +97,10 @@ class PilotProvider:
                 raise ValueError
         except (KeyError, ValueError, TypeError):
             raise ProviderTimeout("Receipt fără timestamp valid") from None
-        return {k: receipt[k] for k in ("receipt_ref", "provider", "effect_key", "digest", "amount", "received_at")}
+        accepted = {k: receipt[k] for k in ("receipt_ref", "provider", "effect_key", "digest", "amount", "received_at")}
+        if telemetry_degraded:
+            accepted["telemetryStatus"] = "DEGRADED"
+        return accepted
 
     def _observation(self, event):
         # Contract published by SOL-03: exact service-observation envelope.

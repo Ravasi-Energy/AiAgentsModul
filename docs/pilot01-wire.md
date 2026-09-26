@@ -40,11 +40,18 @@ Provenance trebuie corelat cu un checkout curat la gate.
 
 Maparea comună consumată: `bo.service-observation.v1` publicată de SOL-03 în
 `coordonare/contracte/bo.service-observation.v1/README.md`. Nu există contract
-concurent: observation→`/v1/observations`; Heartbeat/RunFinished→
-`/v1/telemetry/events`; receipt/checkpoint existente→`/v1/execution-events`.
+concurent: service-observation→`/v1/observations` (scope `modelobs:write`,
+`/v1/model-observations` este aliasul echivalent; ambele dispechează pe
+`schemaVersion`); Heartbeat/RunFinished→`POST /v1/telemetry` (scope
+`telemetry:write`; `/v1/telemetry/events` este alias aditiv cu autorizare
+identică, acceptat de receptor și disponibil dacă se preferă transportul pe
+un singur endpoint — `/v1/telemetry` dispechează la fel pe `schemaVersion`);
+receipt/checkpoint existente→`/v1/execution-events`.
 Același tenant/product/producer/installation, executionRef/runRef/correlationId.
 O declarație RunFinished SUCCEEDED păstrează verificationStatus UNKNOWN;
-numai ledgerul și receiptul corelat confirmă efectul.
+numai ledgerul și receiptul corelat confirmă efectul. Telemetria nu veto-ează
+efectul: un eșec de persistare/validare a observației este raportat ca
+`telemetryStatus: DEGRADED` în receiptul ledgerului, nu ca răspuns pierdut.
 
 ## Fixture HTTP locală (nu API ERP propus)
 

@@ -18,7 +18,10 @@ def deliver(tenant, envelope, db_path=None):
     token = os.environ.get("BO_PILOT_OBSERVATION_TOKEN" if service else "BO_TELEMETRY_TOKEN", "")
     if not token:
         raise ValueError("Credential observație/telemetrie neconfigurat")
-    request = Request(base + ("/v1/observations" if service else "/v1/telemetry/events"),
+    # Canonical published routes: /v1/observations (dispatches on schemaVersion,
+    # modelobs:write) and /v1/telemetry (telemetry:write; /v1/telemetry/events is
+    # an additive alias with identical authorization on the receiver side).
+    request = Request(base + ("/v1/observations" if service else "/v1/telemetry"),
                       data=json.dumps(envelope).encode(),
                       headers={"Content-Type": "application/json", "Authorization": "Bearer " + token})
     try:
