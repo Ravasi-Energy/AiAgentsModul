@@ -5,6 +5,12 @@ require `BACKEND_PROXY_SECRET`, configured identically on API and Next.js and
 separately from `BACKEND_SHARED_SECRET`. Incoming caller headers are stripped.
 Existing deployments must provision the new server-only secret before enabling
 user traffic. No credentials belong in BO settings or the database.
+Generate the proxy credential independently, distribute the same value to the
+API and Next.js server through the deployment's secret mechanism, and restart
+both processes. Never use a `NEXT_PUBLIC_*` variable. A missing, mismatched, or
+service-identical proxy credential rejects delegated identities with HTTP 401;
+the service-only identity remains an operator and cannot write settings (403).
+Do not restore access by disabling authentication or accepting caller headers.
 
 Every effect checks the local mandate chain and each Guardian binding. A child
 inherits an omitted binding; an explicit different binding adds a constraint,
@@ -54,3 +60,30 @@ The vendored event schema is from Guardian `7401eaa`, SHA256
 `e04fafeba4a673eed51a01ce6c36269129e4c6c62981ce105f7f641735e75010`.
 Checkpoint `fencingToken` is the persistent run epoch, including terminal states;
 it agrees with the lease token whenever a lease is present.
+
+## FIN-01 browser closure
+
+The child mandate form caps its requested expiry at the selected parent's expiry
+and explains that limit. Settings save feedback uses the registry's actual effect
+description. Run details discard authority results when the run changes state;
+selecting another run clears the previous run's notices and verdict. Execution
+and mandate inputs have explicit accessible names.
+
+Real Chromium validation used the existing Playwright installation, synthetic
+Auth.js sessions, the real Next.js production build and BO HTTP routes on
+loopback. No OAuth account or external provider was contacted. Desktop 1440×1000
+and mobile 390×844 were exercised in light/dark, including loading/error, setting
+CAS conflict, delegated identity refusal, pending controls, UNKNOWN receipt
+recovery and dead-letter history. Local evidence and reproducible harnesses are
+in `BOGuardian/verificari/BO-SOL-02/fin01`; the coordinator's handoff is
+`agenti/BO-SOL-02/remedieri-01/PREDARE-FIN01.md` in that workspace.
+
+The base-to-head upgrade probe executed BO sources from `35193dc` against an
+isolated SQLite database before starting the remediated code: an UNKNOWN legacy
+RELEASED reservation became EXPOSED, an active RESERVED reservation and original
+checkpoints/ledger were retained, excess budget was rejected, and receipt recovery
+made no second submission. Only the previously pending run made a new submission.
+This does not validate a live rollback: stop producers/workers before rollback,
+retain the upgraded database/evidence, and reconcile external receipts before
+resuming any older producer. Deploy the Guardian contract first, BOAgents second;
+validate delegated user and service identities before admitting user traffic.

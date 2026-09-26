@@ -71,7 +71,7 @@ function SettingEditor({
         kind: "ok",
         text: res.applied
           ? "Salvat și aplicat imediat."
-          : "Salvat — se aplică la următoarea simulare.",
+          : `Salvat. ${setting.effect_ro}`,
       });
     } catch (err) {
       if (err instanceof BoApiError && err.status === 409) {

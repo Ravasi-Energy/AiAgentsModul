@@ -216,7 +216,11 @@ function MandatesSection({
       setNotice({ kind: "danger", text: "Valabilitatea trebuie să fie un număr de ore pozitiv." });
       return;
     }
-    const expires = new Date(Date.now() + hours * 3600_000).toISOString();
+    const parent = mandates.find((m) => m.mandate_id === parentId);
+    const requestedExpiry = Date.now() + hours * 3600_000;
+    const expires = new Date(
+      parent ? Math.min(requestedExpiry, Date.parse(parent.expires_at)) : requestedExpiry,
+    ).toISOString();
     await run(
       () =>
         createBoMandate({
@@ -285,18 +289,21 @@ function MandatesSection({
             <input
               className="bo-input"
               placeholder="guardian_ref (opțional — legătură explicită)"
+              aria-label="Referință Guardian (opțională)"
               value={guardianRef}
               onChange={(e) => setGuardianRef(e.target.value)}
             />
             <input
               className="bo-input"
               placeholder="resurse (ex. synth.*, tool:x)"
+              aria-label="Resurse permise"
               value={resources}
               onChange={(e) => setResources(e.target.value)}
             />
             <input
               className="bo-input"
               placeholder="acțiuni (ex. increment, read)"
+              aria-label="Acțiuni permise"
               value={actions}
               onChange={(e) => setActions(e.target.value)}
             />
@@ -304,6 +311,7 @@ function MandatesSection({
               className="bo-input"
               style={{ width: 110 }}
               placeholder="buget"
+              aria-label="Buget mandat"
               value={budget}
               onChange={(e) => setBudget(e.target.value)}
             />
@@ -311,6 +319,7 @@ function MandatesSection({
               className="bo-input"
               style={{ width: 110 }}
               placeholder="pași max"
+              aria-label="Pași maximi ai mandatului"
               value={maxSteps}
               onChange={(e) => setMaxSteps(e.target.value)}
             />
@@ -318,6 +327,7 @@ function MandatesSection({
               className="bo-input"
               style={{ width: 130 }}
               placeholder="valabil (ore)"
+              aria-label="Valabilitate în ore"
               value={ttlHours}
               onChange={(e) => setTtlHours(e.target.value)}
             />
@@ -334,6 +344,7 @@ function MandatesSection({
             Delegarea nu amplifică drepturi: copilul primește intersecția
             cu părintele și cu politica curentă. guardian_ref leagă
             mandatul de autoritatea Guardian — stabil și explicit.
+            {parentId ? " Valabilitatea copilului este plafonată la expirarea părintelui." : ""}
           </p>
         </div>
       ) : null}
@@ -463,6 +474,7 @@ function SubmitRunForm({
               className="bo-input"
               style={{ width: 110 }}
               placeholder="buget"
+              aria-label="Buget execuție"
               value={budget}
               onChange={(e) => setBudget(e.target.value)}
             />
@@ -630,6 +642,9 @@ function RunDetail({
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<{ kind: "ok" | "warn" | "danger"; text: string } | null>(null);
   const [verify, setVerify] = useState<BoAuthorityCheck | null>(null);
+
+  // A verdict is a point-in-time check, never authority for a changed run.
+  useEffect(() => setVerify(null), [detail.run.updated_at]);
 
   async function act(fn: () => Promise<unknown>, okText: string) {
     setBusy(true);
@@ -1102,6 +1117,7 @@ export default function BoExecutionsPage() {
 
       {detail ? (
         <RunDetail
+          key={detail.run.run_id}
           detail={detail}
           canOperate={canOperate}
           onChanged={() => void load()}
