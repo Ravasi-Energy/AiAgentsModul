@@ -7,9 +7,11 @@ Existing deployments must provision the new server-only secret before enabling
 user traffic. No credentials belong in BO settings or the database.
 Generate the proxy credential independently, distribute the same value to the
 API and Next.js server through the deployment's secret mechanism, and restart
-both processes. Never use a `NEXT_PUBLIC_*` variable. A missing, mismatched, or
-service-identical proxy credential rejects delegated identities with HTTP 401;
-the service-only identity remains an operator and cannot write settings (403).
+both processes. Never use a `NEXT_PUBLIC_*` variable. Next.js returns 503
+`delegated_identity_not_configured` if its proxy credential is absent or equals
+the service key. The API rejects missing, mismatched, or service-identical proxy
+credentials with HTTP 401 for delegated identities. A service-only identity
+remains an operator and cannot write settings (403).
 Do not restore access by disabling authentication or accepting caller headers.
 
 Every effect checks the local mandate chain and each Guardian binding. A child

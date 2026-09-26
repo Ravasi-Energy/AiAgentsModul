@@ -795,12 +795,12 @@ REGISTRY: dict[str, SettingSpec] = {
         tab="exec",
         label_ro="Endpoint Guardian (autorizare + evenimente)",
         label_en="Guardian endpoint (authorization + events)",
-        help_ro="URL de bază Guardian pentru statusul mandatului și livrarea evenimentelor de execuție. Gol = fără legătură Guardian (doar lanțul local).",
+        help_ro="URL de bază Guardian pentru statusul mandatului și livrarea evenimentelor. Gol: se încearcă BO_TELEMETRY_ENDPOINT; fără niciun endpoint, mandatele legate sau supravegherea obligatorie opresc efectele.",
         owner_role="admin",
         edit_role="admin",
         sensitivity="normal",
         effect_ro="Setat: fiecare frontieră de efect reverifică starea mandatului în Guardian; outbox-ul livrează către /v1/execution-events.",
-        acceptance_ro="Gol: verificarea Guardian e oprită; setat fără guardian_ref pe mandat → efectul e blocat doar dacă autorizarea e obligatorie.",
+        acceptance_ro="Standalone este permis doar pentru mandate nelegate și autorizare opțională. Un mandat legat nu devine standalone când endpointul lipsește.",
         validate=lambda v: _validate_urlish(v, label="Endpoint Guardian"),
     ),
     "bo.exec.guardian_secret_ref": SettingSpec(
@@ -818,7 +818,7 @@ REGISTRY: dict[str, SettingSpec] = {
         edit_role="admin",
         sensitivity="normal",
         effect_ro="Clientul Guardian citește tokenul din variabila de mediu numită aici; lipsa ei e tratată ca eroare de configurare.",
-        acceptance_ro="Doar numele variabilei e persistat — tokenul nu ajunge în DB, request-uri sau loguri.",
+        acceptance_ro="Doar numele variabilei e persistat; tokenul se trimite numai în antetul Bearer către Guardian, nu în DB, cereri de Setări sau loguri.",
         validate=lambda v: _validate_secret_ref(v, label="Referința de secret"),
     ),
     "bo.exec.guardian_policy_secret_ref": SettingSpec(

@@ -52,3 +52,23 @@ def test_reconciliation_time_advances_with_a_stalled_clock(db, monkeypatch):
                          resolution="receipt", actor="test")
     after = store.list_ledger(TENANT, run["run_id"])[0]
     assert datetime.fromisoformat(after["finalized_at"]) > datetime.fromisoformat(before["finalized_at"])
+
+
+def test_execution_delivery_does_not_use_observation_endpoint(db, monkeypatch):
+    from openexecutive.bo.execution import guardian
+    from openexecutive.bo.settings import store as settings
+
+    settings.set_value(TENANT, "bo.exec.guardian_endpoint", "https://guardian.example.invalid",
+                       expected_version=0, actor="test")
+    monkeypatch.setenv("BO_TELEMETRY_ENDPOINT", "https://observations.example.invalid/v1/observations")
+    monkeypatch.setenv("BO_GUARDIAN_TOKEN", "synthetic")
+    calls = []
+
+    def request(method, url, token, timeout, body=None):
+        calls.append((method, url, body))
+        return 202, {"status": "RECEIVED"}
+
+    monkeypatch.setattr(guardian, "_request", request)
+    guardian.post_execution_event(TENANT, {"eventId": "synthetic-event"})
+    assert calls == [("POST", "https://guardian.example.invalid/v1/execution-events",
+                      {"eventId": "synthetic-event"})]

@@ -99,8 +99,9 @@ def _link_config(
 
     ``BO_TELEMETRY_ENDPOINT``/``BO_TELEMETRY_TOKEN`` are honored as the
     deployment-level transport contract (the gate sets them directly);
-    the persisted ``bo.exec.guardian_*`` settings fill whatever the env
-    leaves unset. ``BO_TELEMETRY_ENDPOINT`` is a full URL — the base is
+    the persisted endpoint takes precedence and the environment is its
+    fallback. The named secret takes precedence over BO_TELEMETRY_TOKEN.
+    ``BO_TELEMETRY_ENDPOINT`` is a full URL — the base is
     recovered by stripping ``/v1/...`` for the mandate-status calls."""
     endpoint = str(
         _setting(tenant, "bo.exec.guardian_endpoint", "", db_path)
@@ -412,9 +413,9 @@ def post_execution_event(
         raise GuardianPermanentError(
             "secretul Guardian nu este setat în mediul procesului"
         )
-    url = os.environ.get("BO_TELEMETRY_ENDPOINT", "").rstrip("/") or (
-        f"{endpoint}/v1/execution-events"
-    )
+    # Use the same authority base as status checks. The generic telemetry
+    # endpoint may address observations, not the execution-event contract.
+    url = f"{endpoint}/v1/execution-events"
     try:
         status, body = _request(
             "POST", url, token, timeout_s, body=envelope,
