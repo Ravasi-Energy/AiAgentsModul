@@ -131,6 +131,44 @@ def _identity(request: Request) -> bo_identity.Identity:
 BoIdentity = Annotated[bo_identity.Identity, Depends(_identity)]
 
 
+class _PilotActivation(BaseModel):
+    import_id: str = Field(min_length=1, max_length=80)
+    active: bool
+    expected_version: int = Field(ge=0)
+    reason: str = Field(min_length=3, max_length=300)
+
+
+class _PilotRun(BaseModel):
+    mandate_id: str = Field(min_length=1, max_length=80)
+    correlation_id: str | None = Field(default=None, max_length=80)
+
+
+@router.get("/pilot")
+def pilot_status(ident: BoIdentity) -> Any:
+    from openexecutive.bo.pilot.service import status
+    return status(ident)
+
+
+@router.put("/pilot/activation")
+def pilot_activation(body: _PilotActivation, ident: BoIdentity) -> Any:
+    from openexecutive.bo.pilot.service import change_activation
+    return change_activation(ident, **body.model_dump())
+
+
+@router.post("/pilot/runs", status_code=201)
+def pilot_run(body: _PilotRun, ident: BoIdentity) -> Any:
+    from openexecutive.bo.pilot.service import submit
+    return submit(ident, **body.model_dump())
+
+
+@router.post("/pilot/runs/{run_id}/telemetry/replay")
+def pilot_telemetry_replay(run_id: str, ident: BoIdentity) -> Any:
+    """Re-queue missing observation/telemetry envelopes from the persisted
+    evidence — idempotent, audited, never a new effect or provider call."""
+    from openexecutive.bo.pilot.service import replay_telemetry
+    return replay_telemetry(ident, run_id)
+
+
 class _SettingPatch(BaseModel):
     value: Any
     expected_version: int = Field(ge=0)
@@ -207,8 +245,8 @@ def _config_applied(ident: bo_identity.Identity, key: str,
             "appliedVersion": record["version"],
             "actorRef": opaque_actor_ref(ident.actor),
         })
-    except Exception:  # noqa: BLE001 — telemetry never breaks the write path
-        logger.warning("ConfigApplied emit failed", exc_info=True)
+    except Exception as exc:  # noqa: BLE001 — telemetry never breaks the write path
+        logger.warning("emiterea ConfigApplied a eșuat (%s)", type(exc).__name__)
 
 
 # --------------------------------------------------------------------------- #
@@ -315,15 +353,34 @@ def get_run(run_id: str,
 def telemetry_status(ident: BoIdentity) -> Any:
     bo_identity.require(ident, "telemetry:read")
     adapter = get_adapter()
+    cfg = adapter.resolve(ident.tenant)
     return {
+        # Bootstrap = the env/injected adapter the process was built with.
         "enabled": adapter.enabled,
         "transport": type(adapter.transport).__name__,
         "emitted": adapter.emitted,
         "dropped": adapter.dropped,
         "rejected": adapter.rejected,
         "schema_version": "bo.telemetry.v1",
-        "note": "Telemetria este oprită implicit; se activează doar prin "
-                "configurație explicită (BO_TELEMETRY_*).",
+        # Effective = what the next envelope for this tenant actually uses —
+        # administered bo.telemetry.* rows win over bootstrap. The token
+        # itself is server-only; only its configured/not-configured status
+        # and the env-var reference are exposed.
+        "effective": {
+            "enabled": cfg.enabled,
+            "transport": cfg.transport_kind,
+            "endpoint": cfg.endpoint or None,
+            "token_ref": cfg.token_ref,
+            "token_configured": cfg.token_configured,
+            "incomplete": cfg.enabled
+            and cfg.transport_kind == "http"
+            and cfg.transport is None,
+            "source": cfg.source,
+        },
+        "note": "Telemetria este oprită implicit; se activează prin "
+                "BO_TELEMETRY_ENABLED sau prin setarea tenant "
+                "bo.telemetry.enabled — valoarea salvată are prioritate "
+                "față de bootstrap.",
     }
 
 

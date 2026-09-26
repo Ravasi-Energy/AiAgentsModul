@@ -8,6 +8,7 @@ modelului real, BoBot cu LLM oprit (fără dependență de router).
 from __future__ import annotations
 
 import json
+import time
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -707,6 +708,181 @@ class TestDeliveryOutbox:
                 ("2020-01-01T00:00:00Z",),
             )
         assert store.sweep_observations(TENANT, 1) == 1
+
+
+# --------------------------------------------------------------------------- #
+# S-01 — per-tenant worker cadence: interval re-read on every cycle,
+# 0 = manual only, a slow tenant never delays a fast one
+# --------------------------------------------------------------------------- #
+
+class TestPerTenantWorker:
+    def _adapter(self, monkeypatch: pytest.MonkeyPatch):
+        from openexecutive.bo.telemetry import adapter as tel
+
+        ad = tel.TelemetryAdapter(enabled=True, transport=tel.BufferedTransport())
+        monkeypatch.setattr(tel, "_adapter", ad)
+        return ad
+
+    def _pending(self, tenant: str, ref: str, db: Path) -> None:
+        store.enqueue_outbox(
+            tenant, "models", ref,
+            {"schemaVersion": "bo.model-observation.v1",
+             "eventId": f"evt_{tenant}_{ref}", "tenantRef": tenant},
+            db_path=db,
+        )
+
+    def _set_interval(self, tenant: str, seconds: int, db: Path) -> None:
+        with bo_db.get_conn(db) as conn:
+            row = conn.execute(
+                "SELECT version FROM bo_settings WHERE tenant = ? AND key = ?",
+                (tenant, "bo.router.delivery_interval_s"),
+            ).fetchone()
+        settings_store.set_value(
+            tenant, "bo.router.delivery_interval_s", seconds,
+            expected_version=0 if row is None else int(row["version"]),
+            actor="admin@t", db_path=db,
+        )
+
+    def test_interval_zero_is_manual_even_with_active_tenant(
+        self, db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Tenant A at interval 0 must NOT be drained just because tenant B
+        (interval 30) has an active schedule — the per-tenant read replaces
+        the old global max()."""
+        from openexecutive.bo.routing import delivery
+
+        adapter = self._adapter(monkeypatch)
+        self._pending("tenant-manual", "m1", db)
+        self._pending("tenant-auto", "a1", db)
+        self._set_interval("tenant-manual", 0, db)
+        self._set_interval("tenant-auto", 30, db)
+
+        due: dict[str, float] = {}
+        now = 1000.0
+        delivery._worker_cycle(now, due, adapter, db)
+        assert "tenant-manual" not in due          # never even scheduled
+        assert due["tenant-auto"] == now + 30
+        delivery._worker_cycle(now + 31, due, adapter, db)  # past due
+        assert store.outbox_stats("tenant-manual", db_path=db)["outbox_pending"] == 1
+        assert store.outbox_stats("tenant-auto", db_path=db)["outbox_pending"] == 0
+
+        # Manual flush is still the drain for the interval-0 tenant.
+        res = observe.flush_pending("tenant-manual", db_path=db)
+        assert res["sent"] == 1
+        assert store.outbox_stats("tenant-manual", db_path=db)["outbox_pending"] == 0
+
+    def test_fast_tenant_not_delayed_by_slow_tenant(
+        self, db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A 3600s tenant cannot push a 5s tenant's wake: the sleep is the
+        MINIMUM due time, never the maximum interval."""
+        from openexecutive.bo.routing import delivery
+
+        adapter = self._adapter(monkeypatch)
+        self._pending("tenant-fast", "f", db)
+        self._pending("tenant-slow", "s", db)
+        self._set_interval("tenant-fast", 5, db)
+        self._set_interval("tenant-slow", 3600, db)
+
+        due: dict[str, float] = {}
+        wait = delivery._worker_cycle(0.0, due, adapter, db)
+        assert wait == 5
+        assert due["tenant-slow"] == 3600
+        delivery._worker_cycle(5.0, due, adapter, db)
+        assert store.outbox_stats("tenant-fast", db_path=db)["outbox_pending"] == 0
+        assert store.outbox_stats("tenant-slow", db_path=db)["outbox_pending"] == 1
+        # the slow tenant's own due time was not consumed by the fast drain
+        assert due["tenant-slow"] == 3600
+
+    def test_live_interval_transitions_without_restart(
+        self, db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Cycle-level live re-read: 30→0 drops the pending schedule, 0→10
+        reschedules fresh — no process restart, no instant overdue fire."""
+        from openexecutive.bo.routing import delivery
+
+        adapter = self._adapter(monkeypatch)
+        self._pending("tenant-live", "l1", db)
+        self._set_interval("tenant-live", 30, db)
+
+        due: dict[str, float] = {}
+        delivery._worker_cycle(0.0, due, adapter, db)
+        assert due["tenant-live"] == 30
+
+        # 30 → 0 while the schedule is pending: the tenant is excluded and
+        # the stale due entry is dropped — its envelope stays pending.
+        self._set_interval("tenant-live", 0, db)
+        delivery._worker_cycle(40.0, due, adapter, db)   # would have been due
+        assert "tenant-live" not in due
+        assert store.outbox_stats("tenant-live", db_path=db)["outbox_pending"] == 1
+
+        # 0 → 10 re-enables automatic delivery with a FRESH countdown —
+        # the envelope does not fire instantly on the stale schedule.
+        self._set_interval("tenant-live", 10, db)
+        delivery._worker_cycle(50.0, due, adapter, db)
+        assert due["tenant-live"] == 60.0
+        assert store.outbox_stats("tenant-live", db_path=db)["outbox_pending"] == 1
+        delivery._worker_cycle(61.0, due, adapter, db)
+        assert store.outbox_stats("tenant-live", db_path=db)["outbox_pending"] == 0
+
+    def test_disabled_telemetry_tenant_skipped_by_cycle(
+        self, db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Administered bo.telemetry.enabled=false is honored per tick even
+        though the bootstrap adapter is enabled (S-02 wiring into S-01)."""
+        from openexecutive.bo.routing import delivery
+
+        adapter = self._adapter(monkeypatch)   # bootstrap enabled
+        self._pending("tenant-off", "x", db)
+        self._set_interval("tenant-off", 30, db)
+        settings_store.set_value(
+            "tenant-off", "bo.telemetry.enabled", False,
+            expected_version=0, actor="admin@t", db_path=db,
+        )
+        due: dict[str, float] = {}
+        delivery._worker_cycle(0.0, due, adapter, db)
+        delivery._worker_cycle(40.0, due, adapter, db)   # past the 30s mark
+        assert "tenant-off" not in due
+        assert store.outbox_stats("tenant-off", db_path=db)["outbox_pending"] == 1
+
+    def test_ensure_worker_ignores_manual_only_tenants(
+        self, db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from openexecutive.bo.routing import delivery
+
+        self._adapter(monkeypatch)
+        self._pending("tenant-manual", "m", db)
+        self._set_interval("tenant-manual", 0, db)
+        assert delivery.ensure_worker(db_path=db) is False
+        assert delivery._worker_thread is None
+        # …but one auto tenant among manual ones does start it.
+        self._pending("tenant-auto", "a", db)
+        self._set_interval("tenant-auto", 30, db)
+        assert delivery.ensure_worker(db_path=db) is True
+
+    def test_worker_thread_live_transition(
+        self, db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The real daemon thread: interval-1s tenant drains automatically,
+        then a live switch to 0 stops auto-delivery without a restart."""
+        from openexecutive.bo.routing import delivery
+
+        self._adapter(monkeypatch)
+        self._set_interval("tenant-live", 1, db)
+        self._pending("tenant-live", "t1", db)
+        assert delivery.ensure_worker(db_path=db) is True
+
+        deadline = time.time() + 6
+        while time.time() < deadline:
+            if store.outbox_stats("tenant-live", db_path=db)["outbox_pending"] == 0:
+                break
+            time.sleep(0.05)
+        assert store.outbox_stats("tenant-live", db_path=db)["outbox_pending"] == 0
+
+        self._set_interval("tenant-live", 0, db)
+        self._pending("tenant-live", "t2", db)
+        time.sleep(2.5)  # several ticks at the 1s cadence would have fired
+        assert store.outbox_stats("tenant-live", db_path=db)["outbox_pending"] == 1
 
 
 # --------------------------------------------------------------------------- #

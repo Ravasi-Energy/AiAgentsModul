@@ -25,11 +25,13 @@ type LoadState =
 
 // Gruparea pe taburi — registrul marchează fiecare parametru; tabul
 // „exec" e suprafața de execuție/recuperare cerută de VAL4-03.
-const TAB_ORDER = ["general", "routing", "exec"] as const;
+const TAB_ORDER = ["general", "routing", "telemetrie", "exec", "pilot"] as const;
 const TAB_LABEL: Record<string, string> = {
   general: "General",
   routing: "Rutare modele",
+  telemetrie: "Telemetrie",
   exec: "Execuție și recuperare",
+  pilot: "Pilot ERP sintetic",
 };
 
 function SettingEditor({
@@ -131,6 +133,12 @@ function SettingEditor({
                     <option value="false">Oprit</option>
                     <option value="true">Pornit</option>
                   </>
+                ) : setting.key === "bo.pilot.profile" ? (
+                  <><option value="disabled">Dezactivat</option><option value="synthetic-loopback">Sintetic loopback</option></>
+                ) : setting.key === "bo.pilot.supervision" ? (
+                  <><option value="standalone">Standalone</option><option value="required">Guardian obligatoriu</option></>
+                ) : setting.key === "bo.telemetry.transport" ? (
+                  <><option value="buffered">Buffered (memorie, preview)</option><option value="http">HTTP către endpointul administrat</option></>
                 ) : (
                   <>
                     <option value="ro">Română</option>
@@ -322,19 +330,39 @@ export default function BoSettingsPage() {
 
       <div className="bo-card" style={{ marginTop: 16 }}>
         <div className="bo-spread">
-          <h3 className="bo-card-title">Telemetrie produs</h3>
+          <h3 className="bo-card-title">Telemetrie produs — stare activă</h3>
           {telemetry ? (
-            <Pill kind={telemetry.enabled ? "warn" : "ok"} icon="activity">
-              {telemetry.enabled ? "activă" : "oprită (implicit)"}
+            <Pill
+              kind={telemetry.effective?.incomplete ? "warn" : telemetry.effective?.enabled ?? telemetry.enabled ? "info" : "neutral"}
+              icon="activity"
+            >
+              {telemetry.effective?.incomplete
+                ? "incomplet configurată"
+                : (telemetry.effective?.enabled ?? telemetry.enabled)
+                  ? "activă"
+                  : "oprită"}
             </Pill>
           ) : (
             <Pill kind="neutral">nemăsurat</Pill>
           )}
         </div>
         <p className="bo-hint" style={{ marginTop: 8 }}>
-          {telemetry
-            ? `${telemetry.transport} · emise: ${telemetry.emitted} · respinse: ${telemetry.rejected}. ${telemetry.note}`
-            : "Starea adaptorului nu a putut fi citită."}
+          {telemetry?.effective
+            ? `Activ acum: ${telemetry.effective.enabled ? "pornit" : "oprit"} · transport ${telemetry.effective.transport}${telemetry.effective.endpoint ? ` → ${telemetry.effective.endpoint}` : ""} · token ${telemetry.effective.token_ref}: ${telemetry.effective.token_configured ? "configurat pe server" : "lipsă"}.`
+            : telemetry
+              ? `${telemetry.transport} · emise: ${telemetry.emitted} · respinse: ${telemetry.rejected}.`
+              : "Starea adaptorului nu a putut fi citită."}
+        </p>
+        {telemetry?.effective?.incomplete ? (
+          <InlineAlert kind="warn">
+            Transport http ales fără endpoint sau token — plicurile rămân în
+            coadă până la completarea configurației.
+          </InlineAlert>
+        ) : null}
+        <p className="bo-hint" style={{ marginTop: 8 }}>
+          Contoare proces: emise {telemetry?.emitted ?? "—"} · respinse{" "}
+          {telemetry?.rejected ?? "—"} · omise {telemetry?.dropped ?? "—"}.{" "}
+          {telemetry?.note}
         </p>
       </div>
     </div>
