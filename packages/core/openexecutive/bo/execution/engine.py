@@ -674,6 +674,11 @@ def reconcile_run(
                     receipt_ref=receipt["receipt_ref"], receipt=receipt,
                     db_path=db_path,
                 )
+                _emit_receipt(
+                    tenant, store.get_run(tenant, run_id, db_path=db_path),
+                    entry, status="CONFIRMED", receipt_ref=receipt["receipt_ref"],
+                    db_path=db_path,
+                )
                 resolved += 1
             else:
                 store.mark_ledger_status(
@@ -848,6 +853,16 @@ def _emit_receipt(
     from openexecutive.bo.execution import serialize
 
     try:
+        # Callers may hold the pre-finalization snapshot. Emit the persisted
+        # verdict/time, and never publish an old verdict after reconciliation.
+        entry = store.get_ledger_entry(tenant, entry["entry_id"], db_path=db_path)
+        expected_states = {
+            "CONFIRMED": (store.LED_SUCCEEDED,),
+            "FAILED": (store.LED_FAILED,),
+            "UNKNOWN": (store.LED_UNKNOWN, store.LED_RECONCILIATION),
+        }
+        if entry["status"] not in expected_states.get(status, ()):
+            return
         mandate = store.get_mandate(
             tenant, run["mandate_id"], db_path=db_path
         )

@@ -1198,7 +1198,7 @@ def mark_ledger_status(
     with get_conn(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
-            "SELECT status, fence_version, lease_until FROM bo_effect_ledger WHERE tenant = ? AND entry_id = ?",
+            "SELECT status, fence_version, lease_until, finalized_at FROM bo_effect_ledger WHERE tenant = ? AND entry_id = ?",
             (tenant, entry_id),
         ).fetchone()
         if row is None:
@@ -1210,16 +1210,23 @@ def mark_ledger_status(
             raise ConflictError("un worker activ nu poate fi declarat neexecutat")
         if expected_fence is not None and row["fence_version"] != expected_fence:
             raise ConflictError("reconciliere depășită (fencing)")
+        # Guardian orders verdicts of the same attempt by occurredAt. A
+        # recovered receipt is a new verdict, even within one clock tick.
+        finalized = datetime.fromisoformat(_now().replace("Z", "+00:00"))
+        if row["finalized_at"]:
+            previous = datetime.fromisoformat(row["finalized_at"].replace("Z", "+00:00"))
+            finalized = max(finalized, previous + timedelta(milliseconds=1))
+        finalized_at = finalized.isoformat(timespec="milliseconds").replace("+00:00", "Z")
         conn.execute(
             "UPDATE bo_effect_ledger SET fence_version = fence_version + 1, status = ?, receipt_ref = "
             "COALESCE(?, receipt_ref), receipt_json = "
             "COALESCE(?, receipt_json), lease_owner = NULL, "
-            "lease_until = NULL, finalized_at = COALESCE(finalized_at, ?) "
+            "lease_until = NULL, finalized_at = ? "
             "WHERE tenant = ? AND entry_id = ?",
             (
                 status, receipt_ref,
                 json.dumps(receipt) if receipt is not None else None,
-                _now(), tenant, entry_id,
+                finalized_at, tenant, entry_id,
             ),
         )
 
