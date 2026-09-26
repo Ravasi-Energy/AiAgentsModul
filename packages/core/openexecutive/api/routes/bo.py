@@ -245,8 +245,8 @@ def _config_applied(ident: bo_identity.Identity, key: str,
             "appliedVersion": record["version"],
             "actorRef": opaque_actor_ref(ident.actor),
         })
-    except Exception:  # noqa: BLE001 — telemetry never breaks the write path
-        logger.warning("ConfigApplied emit failed", exc_info=True)
+    except Exception as exc:  # noqa: BLE001 — telemetry never breaks the write path
+        logger.warning("emiterea ConfigApplied a eșuat (%s)", type(exc).__name__)
 
 
 # --------------------------------------------------------------------------- #
@@ -353,15 +353,34 @@ def get_run(run_id: str,
 def telemetry_status(ident: BoIdentity) -> Any:
     bo_identity.require(ident, "telemetry:read")
     adapter = get_adapter()
+    cfg = adapter.resolve(ident.tenant)
     return {
+        # Bootstrap = the env/injected adapter the process was built with.
         "enabled": adapter.enabled,
         "transport": type(adapter.transport).__name__,
         "emitted": adapter.emitted,
         "dropped": adapter.dropped,
         "rejected": adapter.rejected,
         "schema_version": "bo.telemetry.v1",
-        "note": "Telemetria este oprită implicit; se activează doar prin "
-                "configurație explicită (BO_TELEMETRY_*).",
+        # Effective = what the next envelope for this tenant actually uses —
+        # administered bo.telemetry.* rows win over bootstrap. The token
+        # itself is server-only; only its configured/not-configured status
+        # and the env-var reference are exposed.
+        "effective": {
+            "enabled": cfg.enabled,
+            "transport": cfg.transport_kind,
+            "endpoint": cfg.endpoint or None,
+            "token_ref": cfg.token_ref,
+            "token_configured": cfg.token_configured,
+            "incomplete": cfg.enabled
+            and cfg.transport_kind == "http"
+            and cfg.transport is None,
+            "source": cfg.source,
+        },
+        "note": "Telemetria este oprită implicit; se activează prin "
+                "BO_TELEMETRY_ENABLED sau prin setarea tenant "
+                "bo.telemetry.enabled — valoarea salvată are prioritate "
+                "față de bootstrap.",
     }
 
 

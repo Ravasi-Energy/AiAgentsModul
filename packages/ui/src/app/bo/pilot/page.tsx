@@ -20,6 +20,7 @@ function telemetryLabel(t: BoRunTelemetry): string {
     case "degraded": return "Telemetrie restantă — plicuri lipsă din outbox";
     case "dead": return "Telemetrie în dead-letter — reluare din registrul outbox";
     case "incident": return "Incident telemetrie istoric — coada refăcută";
+    case "corrupt": return "Dovada telemetriei este coruptă";
     case "unavailable": return "Observație indisponibilă — nereconstruibilă";
     default: return "Fără plicuri de telemetrie";
   }
@@ -108,6 +109,7 @@ export default function PilotPage() {
             run.telemetry.status === "incident" ? "neutral" : "warn"}>{telemetryLabel(run.telemetry)}</Pill>
             {run.telemetry.expected > 0 && <span className="bo-mono"> · {run.telemetry.queued}/{run.telemetry.expected} în coadă
               {run.telemetry.delivered > 0 ? `, ${run.telemetry.delivered} livrate` : ""}{run.telemetry.dead > 0 ? `, ${run.telemetry.dead} dead-letter` : ""}</span>}</p>}
+          {run.telemetry?.status === "corrupt" && <p className="bo-muted">Plicul persistat nu poate fi citit — nu se fabrică o observație sănătoasă și nu se reemite nimic; receiptul rămâne dovada efectului.</p>}
           {run.telemetry?.marker && <p className="bo-muted">Efectul rămâne confirmat de receipt ({run.telemetry.marker}
             {run.telemetry.error === "invalid" ? " — plic respins la validare" : run.telemetry.error === "persistence" ? " — persistare eșuată" : ""});
             degradarea privește numai livrarea observației, nu rezultatul execuției.</p>}

@@ -129,6 +129,47 @@ def submit(identity, mandate_id, correlation_id=None, db_path=None):
         actor=identity.actor, db_path=db_path)
 
 
+def _decode_evidence(raw):
+    """Persisted observation bytes → dict. Corrupt or non-object payloads are
+    a controlled refusal (409 via StateError), never an unhandled decode
+    error and never a fabricated observation."""
+    try:
+        event = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        raise package_store.StateError(
+            "Dovada observației persistate este coruptă (JSON necitibil); "
+            "nu se reemite și nu se fabrică o observație") from None
+    if not isinstance(event, dict):
+        raise package_store.StateError(
+            "Dovada observației persistate nu este un plic valid; "
+            "nu se reemite și nu se fabrică o observație")
+    return event
+
+
+def _evidence_usable(event):
+    """Minimum shape the status view can render — ``eventId`` for the
+    expected outbox identities, ``observedAt`` for staleness and
+    ``service.queuePending`` for the health call. Anything else is corrupt
+    evidence: marked as such, preserved untouched, never parsed further."""
+    return (
+        isinstance(event, dict)
+        and isinstance(event.get("eventId"), str)
+        and isinstance(event.get("observedAt"), str)
+        and isinstance(event.get("service"), dict)
+        and type(event["service"].get("queuePending")) is int
+    )
+
+
+def _corrupt_report(marker=None, error=None):
+    """Telemetry posture for a run whose persisted evidence is unreadable:
+    the bytes stay in storage, nothing is replayable and the receipt in the
+    ledger remains the authority on the effect."""
+    return {"status": "corrupt", "marker": marker,
+            "error": error or "observation_corrupt", "expected": 0,
+            "queued": 0, "delivered": 0, "dead": 0, "missing": 0,
+            "replayable": False}
+
+
 def _telemetry_report(tenant, event, ledger, db_path=None):
     """Operator-facing posture of the observation evidence on the durable
     outbox. The receipt remains the proof of effect; this report only
@@ -189,7 +230,7 @@ def replay_telemetry(identity, run_id, db_path=None):
     if not row:
         raise package_store.StateError(
             "Nicio observație persistată pentru rulare; receiptul singur nu reconstruiește telemetria")
-    event = json.loads(row["event_json"])
+    event = _decode_evidence(row["event_json"])
     from openexecutive.bo.pilot.observation import validate
     try:
         validate(event, identity.tenant, run)
@@ -216,19 +257,43 @@ def status(identity, db_path=None):
     runs = [r for r in store.list_runs(identity.tenant, db_path=db_path)
             if any(s.get("resource") == RESOURCE for s in r["steps"])]
     config = configuration(identity.tenant, db_path)
+    observations: dict[str, dict] = {}
+    corrupt: set[str] = set()
     with get_conn(db_path) as conn:
-        observations = {r["run_id"]: json.loads(r["event_json"]) for r in conn.execute(
-            "SELECT * FROM bo_pilot_observations WHERE tenant=?", (identity.tenant,))}
+        for row in conn.execute(
+                "SELECT run_id, event_json FROM bo_pilot_observations WHERE tenant=?",
+                (identity.tenant,)):
+            try:
+                event = json.loads(row["event_json"])
+            except ValueError:
+                event = None
+            if _evidence_usable(event):
+                observations[row["run_id"]] = event
+            else:
+                # Corrupt bytes are preserved in the table but never parsed
+                # again: the run is marked, the rest of the tenant's status
+                # keeps working.
+                corrupt.add(row["run_id"])
     for run in runs:
         event = observations.get(run["run_id"])
         run["observation"] = event
         run["ledger"] = store.list_ledger(identity.tenant, run["run_id"], db_path=db_path)
-        run["telemetry"] = _telemetry_report(identity.tenant, event, run["ledger"], db_path=db_path)
         run["health"] = "UNKNOWN"
+        if run["run_id"] in corrupt:
+            marker = next((e["receipt"]["telemetryStatus"] for e in run["ledger"]
+                           if isinstance(e.get("receipt"), dict)
+                           and e["receipt"].get("telemetryStatus")), None)
+            run["telemetry"] = _corrupt_report(marker=marker)
+            continue
+        run["telemetry"] = _telemetry_report(identity.tenant, event, run["ledger"], db_path=db_path)
         if event:
-            age = (datetime.now(UTC) - datetime.fromisoformat(event["observedAt"].replace("Z", "+00:00"))).total_seconds()
-            run["health"] = "STALE" if age > config["stale_s"] else (
-                "DEGRADED" if event["service"]["queuePending"] > config["max_queue"] else "HEALTHY")
+            try:
+                age = (datetime.now(UTC) - datetime.fromisoformat(event["observedAt"].replace("Z", "+00:00"))).total_seconds()
+                run["health"] = "STALE" if age > config["stale_s"] else (
+                    "DEGRADED" if event["service"]["queuePending"] > config["max_queue"] else "HEALTHY")
+            except (TypeError, ValueError):  # malformed timestamp → same
+                run["observation"] = None    # controlled corrupt marking
+                run["telemetry"] = _corrupt_report()
         if run["state"] != store.RUN_SUCCEEDED:
             run["health"] = "UNKNOWN"
     return {"synthetic": True, "role": identity.role, "activation": activation(identity.tenant, db_path),

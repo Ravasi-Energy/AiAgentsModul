@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
@@ -107,8 +108,121 @@ class HttpTransport:
         return ack if isinstance(ack, dict) else None
 
 
+@dataclass(frozen=True)
+class TelemetryConfig:
+    """Effective per-tenant telemetry configuration.
+
+    Precedence per key: the tenant row in ``bo_settings`` wins when the admin
+    saved one; otherwise the process bootstrap (``BO_TELEMETRY_*`` env or an
+    injected adapter) applies; the registry default is the last resort.
+    ``source`` records where each effective value came from so the UI can
+    distinguish „salvat" from „activ". ``transport`` is the resolved send
+    path — ``None`` when http was selected without endpoint+token (rows stay
+    pending, never silently dropped and never marked delivered)."""
+
+    enabled: bool
+    transport_kind: str
+    endpoint: str
+    token_ref: str
+    token_configured: bool
+    transport: Transport | None
+    source: dict[str, str]
+
+
+_TENANT_OVERRIDES = (
+    ("bo.telemetry.enabled", "enabled"),
+    ("bo.telemetry.transport", "transport"),
+    ("bo.telemetry.endpoint", "endpoint"),
+    ("bo.telemetry.token_ref", "token_ref"),
+)
+
+
 class TelemetryAdapter:
     """Builds + validates + routes ``bo.telemetry.v1`` events."""
+
+    def _bootstrap_kind(self) -> str:
+        if isinstance(self.transport, BufferedTransport):
+            return "buffered"
+        if isinstance(self.transport, HttpTransport):
+            return "http"
+        return "null"
+
+    def _stored(self, tenant: str, key: str, db_path: Path | None) -> Any:
+        """Tenant override if one exists; (value, True) / (None, False).
+        Settings-store failures degrade to „no override" — telemetry must
+        survive a settings hiccup, not gate on it."""
+        try:
+            return settings_store.get_stored_value(tenant, key, db_path=db_path)
+        except Exception:  # noqa: BLE001
+            return None, False
+
+    def resolve(
+        self, tenant: str | None = None, db_path: Path | None = None
+    ) -> TelemetryConfig:
+        """The effective configuration for ``tenant`` at call time —
+        re-resolved on every emit/delivery, so an administered change applies
+        at the next envelope without a process restart."""
+        enabled = self.enabled
+        kind = self._bootstrap_kind()
+        endpoint = getattr(self.transport, "endpoint", "") or os.environ.get(
+            "BO_TELEMETRY_ENDPOINT", ""
+        ).rstrip("/")
+        token_ref = "BO_TELEMETRY_TOKEN"
+        source = {
+            "enabled": "bootstrap",
+            "transport": "bootstrap",
+            "endpoint": "bootstrap" if endpoint else "default",
+            "token_ref": "default",
+        }
+        if tenant is not None:
+            for key, attr in _TENANT_OVERRIDES:
+                value, present = self._stored(tenant, key, db_path)
+                if not present:
+                    continue
+                source[attr] = "tenant"
+                if attr == "enabled":
+                    enabled = bool(value)
+                elif attr == "transport":
+                    kind = str(value)
+                elif attr == "endpoint":
+                    endpoint = str(value)
+                elif attr == "token_ref":
+                    token_ref = str(value)
+        token = os.environ.get(token_ref, "") or os.environ.get(
+            "BO_TELEMETRY_TOKEN", ""
+        )
+        transport: Transport | None
+        if kind == "http":
+            current = self.transport if isinstance(self.transport, HttpTransport) else None
+            if (
+                current is not None
+                and current.endpoint == endpoint
+                and source["token_ref"] == "default"
+            ):
+                transport = current
+            else:
+                transport = (
+                    HttpTransport(endpoint, token) if endpoint and token else None
+                )
+        elif kind == "buffered":
+            transport = (
+                self.transport
+                if isinstance(self.transport, BufferedTransport)
+                else BufferedTransport()
+            )
+        else:
+            # An opaque/injected transport the admin never overrode stays as
+            # the bootstrap behavior.
+            transport = self.transport
+        return TelemetryConfig(
+            enabled=enabled,
+            transport_kind=kind,
+            endpoint=endpoint,
+            token_ref=token_ref,
+            token_configured=bool(token),
+            transport=transport,
+            source=source,
+        )
 
     def __init__(
         self,
@@ -137,7 +251,8 @@ class TelemetryAdapter:
         correlation_id: str | None = None,
         db_path: Path | None = None,
     ) -> dict[str, Any] | None:
-        if not self.enabled:
+        cfg = self.resolve(tenant, db_path)
+        if not cfg.enabled:
             self.dropped += 1
             return None
         try:
@@ -169,7 +284,13 @@ class TelemetryAdapter:
         except schema.TelemetrySchemaError:
             self.rejected += 1
             raise
-        self.transport.send(event)
+        if cfg.transport is None:
+            # http selected without endpoint/token: controlled drop, visible
+            # in counters and /telemetry/status — never silent, never throws
+            # into the caller's business path.
+            self.dropped += 1
+            return None
+        cfg.transport.send(event)
         self.emitted += 1
         return event
 
@@ -208,17 +329,30 @@ class TelemetryAdapter:
             **body,
         }
 
-    def deliver_event(self, event: dict[str, Any]) -> dict[str, Any] | None:
-        """Send an already-built envelope through the configured transport.
+    def deliver_event(
+        self,
+        event: dict[str, Any],
+        *,
+        tenant: str | None = None,
+        db_path: Path | None = None,
+    ) -> dict[str, Any] | None:
+        """Send an already-built envelope through the tenant's effective
+        transport (administered ``bo.telemetry.*`` rows win over bootstrap).
 
         Returns the receiver ack (``RECEIVED``/``DUPLICATE`` both mean the
         receiver holds the event). Raises ``TelemetryDisabledError`` when the
         adapter is disabled — the caller must keep the envelope pending.
         """
-        if not self.enabled:
+        cfg = self.resolve(tenant or event.get("tenantRef"), db_path)
+        if not cfg.enabled:
             self.dropped += 1
             raise TelemetryDisabledError("telemetria este dezactivată")
-        ack = self.transport.send(event)
+        if cfg.transport is None:
+            self.dropped += 1
+            raise TelemetryDisabledError(
+                "transportul http este incomplet configurat (endpoint/token)"
+            )
+        ack = cfg.transport.send(event)
         self.emitted += 1
         return ack
 
@@ -228,6 +362,7 @@ class TelemetryAdapter:
         tenant: str,
         body: dict[str, Any],
         occurred_at: str | None = None,
+        db_path: Path | None = None,
     ) -> dict[str, Any] | None:
         """Emit a ``bo.model-observation.v1`` document (VAL3-01, A02 contract).
 
@@ -239,13 +374,17 @@ class TelemetryAdapter:
         One-shot convenience for fixture/probe drivers — the product's durable
         path is ``build_model_observation`` + outbox + ``deliver_event``.
         """
-        if not self.enabled:
+        cfg = self.resolve(tenant, db_path)
+        if not cfg.enabled:
             self.dropped += 1
             return None
         event = self.build_model_observation(
             tenant=tenant, body=body, occurred_at=occurred_at
         )
-        self.transport.send(event)
+        if cfg.transport is None:
+            self.dropped += 1
+            return None
+        cfg.transport.send(event)
         self.emitted += 1
         return event
 

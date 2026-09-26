@@ -245,6 +245,18 @@ export interface BoTelemetryStatus {
   dropped: number;
   rejected: number;
   schema_version: string;
+  /** Configurația efectivă pentru tenantul curent: rândurile salvate
+   *  bo.telemetry.* câștigă față de bootstrap-ul de mediu. Tokenul rămâne
+   *  server-only — aici vedem doar referința și starea configured/missing. */
+  effective?: {
+    enabled: boolean;
+    transport: string;
+    endpoint: string | null;
+    token_ref: string;
+    token_configured: boolean;
+    incomplete: boolean;
+    source: Record<string, string>;
+  };
   note: string;
 }
 
@@ -764,7 +776,7 @@ export function workBoRuns(workerId?: string): Promise<{
 // starea execuției: receiptul rămâne dovada efectului; aici urmărim doar
 // dacă observația persistată a ajuns în outboxul durabil.
 export interface BoRunTelemetry {
-  status: "ok" | "pending" | "degraded" | "dead" | "incident" | "unavailable" | "none";
+  status: "ok" | "pending" | "degraded" | "dead" | "incident" | "unavailable" | "corrupt" | "none";
   marker: string | null;
   error: string | null;
   expected: number;

@@ -9,7 +9,17 @@ from openexecutive.bo.telemetry.adapter import TelemetryDisabledError, get_adapt
 
 
 def deliver(tenant, envelope, db_path=None):
-    if not get_adapter().enabled:
+    adapter = get_adapter()
+    try:
+        # Per-tenant administered setting wins over the process bootstrap;
+        # a resolver failure keeps the bootstrap flag (delivery must survive
+        # a settings hiccup).
+        resolve = getattr(adapter, "resolve", None)
+        enabled = (resolve(tenant, db_path=db_path).enabled
+                   if resolve is not None else adapter.enabled)
+    except Exception:
+        enabled = getattr(adapter, "enabled", False)
+    if not enabled:
         raise TelemetryDisabledError("telemetry disabled")
     base, _, timeout, _ = _link_config(tenant, db_path)
     if not base:

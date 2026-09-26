@@ -92,7 +92,7 @@ Receiptul rămâne dovada efectului: o cădere de telemetrie nu transformă un
 SUCCEEDED valid în eșec și nu relaxează frontierele receiptului (tenant/digest/
 cheie/provider/timestamp greșit rămân UNKNOWN chiar dacă telemetria pică).
 `GET /bo/pilot` raportează per rulare `telemetry`: `status` (none/pending/ok/
-degraded/incident/dead/unavailable), `expected/queued/delivered/dead/missing`,
+degraded/incident/dead/unavailable/corrupt), `expected/queued/delivered/dead/missing`,
 `replayable` și marcajul din receipt (`telemetryStatus`/`telemetryError`).
 „Queued" este starea locală a outboxului, nu confirmare Guardian.
 
@@ -110,6 +110,39 @@ Warning-urile de telemetrie loghează numai clasa excepției (ex.
 text brut sau payload. Verificați logul la degradare; apoi replay, apoi
 `telemetry.status` trebuie să treacă la `incident` (după enqueue) sau `ok`
 (după livrare).
+
+## Dovezi corupte, cadență per tenant și telemetrie administrabilă (PILOT-04)
+
+**Dovadă coruptă sau lipsă.** Un rând `bo_pilot_observations` cu JSON necitibil
+sau cu formă invalidă nu mai produce HTTP 500: rularea este raportată
+`telemetry.status=corrupt` cu `observation=null` și `health=UNKNOWN` — octeții
+rămân în tabelă, neatinși, iar celelalte rulări ale tenantului funcționează.
+Replay-ul refuză controlat 409; nu se fabrică o observație și nu se creează
+efect nou. Rând lipsă → `unavailable`/`none`, același 409 la replay. Un outage
+de stocare outbox la replay → 409 cu motiv; la status → raport `degraded`
+cu `error=outbox_unreachable`.
+
+**Interval de livrare per tenant.** `bo.router.delivery_interval_s` este recitit
+de worker la fiecare trezire, per tenant: `0` = strict manual pentru acel tenant
+(`POST /bo/routing/flush` funcționează mereu), indiferent de ceilalți tenanturi;
+un tenant cu interval mare nu încetinește unul cu interval mic (trezirea e
+programată la cel mai apropiat termen scadent, nu la maximul lor). O schimbare
+de interval salvată se aplică la următorul ciclu fără restart; trecerea la `0`
+renunță la programarea pendinte, iar reactivarea pornește o numărătoare nouă —
+nu declanșează instant backlogul.
+
+**Telemetrie administrabilă.** `bo.telemetry.enabled`, `bo.telemetry.transport`
+(`buffered`|`http`), `bo.telemetry.endpoint` și `bo.telemetry.token_ref` sunt
+setări de tenant în registrul Setărilor (tab „Telemetrie"), cu CAS, RBAC admin
+și audit ca orice setare. Precedență per cheie: rândul salvat al tenantului →
+bootstrap de proces (`BO_TELEMETRY_*` / adaptor injectat) → implicit registrul.
+`GET /bo/telemetry/status` raportează `effective` (ce folosește următorul plic)
+distinct de `bootstrap` (ce a construit procesul), cu `source` per cheie.
+Secretul rămâne server-only: `token_ref` este numele variabilei de mediu, niciodată
+valoarea; UI/API expun doar `token_configured` (da/nu). `http` fără endpoint sau
+fără token disponibil este o stare vizibilă `incomplete` — plicurile rămân în
+outbox, nu sunt marcate livrate. Tokenul bootstrap nu este mutat pe un endpoint
+nou administrat (fără carry-over de secret pe altă destinație).
 
 ## Upgrade, dezinstalare și rollback
 

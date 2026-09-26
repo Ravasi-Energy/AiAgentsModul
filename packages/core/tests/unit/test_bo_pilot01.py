@@ -299,6 +299,7 @@ def _receipt(key="key-synthetic", digest="digest-synthetic"):
 
 def test_telemetry_validation_failure_never_leaks_payload_to_logs(pilot, caplog):
     import logging
+
     from openexecutive.bo.pilot.observation import validate
     result = service.submit(pilot["admin"], pilot["mandate"].mandate_id)
     run_row = store.get_run("tenant-a", result["run_id"])
@@ -359,6 +360,83 @@ def test_invalid_receipt_stays_refused_when_telemetry_fails(pilot, monkeypatch, 
     with pytest.raises(ProviderTimeout):
         provider._accept({"receipt": receipt, "observation": _observation(run_row)},
                          "key-synthetic", "digest-synthetic")
+
+
+@pytest.mark.parametrize("raw", ["{invalid-json", "[]", '"text"', "42", '{"eventId": 1}'])
+def test_corrupt_observation_evidence_is_controlled_refusal_not_500(pilot, raw):
+    """P03-01: corrupt persisted evidence must degrade the run's telemetry
+    view without taking down the whole status or replay surface — no raw
+    JSONDecodeError, no fabricated observation, no new effect."""
+    result = run(pilot)
+    assert result["state"] == "SUCCEEDED"
+    with database.get_conn() as conn:
+        conn.execute(
+            "UPDATE bo_pilot_observations SET event_json = ? "
+            "WHERE tenant = ? AND run_id = ?",
+            (raw, "tenant-a", result["run_id"]),
+        )
+    status = service.status(pilot["admin"])
+    run_row = status["runs"][0]
+    assert run_row["health"] == "UNKNOWN"          # never fabricated healthy
+    assert run_row["observation"] is None          # corrupt bytes stay server-side
+    assert run_row["telemetry"]["status"] == "corrupt"
+    assert run_row["telemetry"]["replayable"] is False
+    with pytest.raises(package_store.StateError):  # → HTTP 409, not a 500
+        service.replay_telemetry(pilot["admin"], result["run_id"])
+    # the corrupt row is preserved as-is and no effect is repeated
+    with database.get_conn() as conn:
+        assert conn.execute(
+            "SELECT event_json FROM bo_pilot_observations WHERE tenant=? AND run_id=?",
+            ("tenant-a", result["run_id"]),
+        ).fetchone()["event_json"] == raw
+    assert pilot["call"]("/stats") == {"effectCount": 1, "submitCalls": 1}
+
+
+def test_corrupt_evidence_over_http_is_200_and_409_never_500(pilot, monkeypatch):
+    """P03-01 over the real router: corrupt evidence → GET stays 200 with the
+    corrupt marker, POST replay is a controlled 409 — never a bare 500."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from openexecutive.api.routes import bo as bo_route
+    monkeypatch.setenv("BO_TENANT_ID", "tenant-a")
+    monkeypatch.setenv("BO_ADMIN_EMAILS", "admin@test")
+    monkeypatch.setenv("BACKEND_PROXY_SECRET", "test-proxy-only")
+    app = FastAPI()
+    app.include_router(bo_route.router)
+    bo_route.register_error_handlers(app)
+    client = TestClient(app)
+    admin = {"x-caller-email": "admin@test", "x-caller-proxy-secret": "test-proxy-only"}
+    result = run(pilot)
+    with database.get_conn() as conn:
+        conn.execute(
+            "UPDATE bo_pilot_observations SET event_json = '{corrupt' "
+            "WHERE tenant = ? AND run_id = ?", ("tenant-a", result["run_id"]))
+    resp = client.get("/bo/pilot", headers=admin)
+    assert resp.status_code == 200
+    body = resp.json()["runs"][0]
+    assert body["telemetry"]["status"] == "corrupt" and body["observation"] is None
+    replay = client.post(f"/bo/pilot/runs/{result['run_id']}/telemetry/replay", headers=admin)
+    assert replay.status_code == 409  # state_conflict — controlled refusal
+    assert pilot["call"]("/stats") == {"effectCount": 1, "submitCalls": 1}
+
+
+def test_corrupt_evidence_does_not_hide_other_runs(pilot):
+    """One tenant's corrupt row marks only its own run; a healthy run on the
+    same tenant keeps its observation and telemetry report."""
+    first = run(pilot)
+    second = run(pilot)
+    with database.get_conn() as conn:
+        conn.execute(
+            "UPDATE bo_pilot_observations SET event_json = '{broken' "
+            "WHERE tenant = ? AND run_id = ?",
+            ("tenant-a", first["run_id"]),
+        )
+    runs = {r["run_id"]: r for r in service.status(pilot["admin"])["runs"]}
+    assert runs[first["run_id"]]["telemetry"]["status"] == "corrupt"
+    assert runs[first["run_id"]]["observation"] is None
+    assert runs[second["run_id"]]["observation"] is not None
+    assert runs[second["run_id"]]["health"] == "HEALTHY"
 
 
 def test_telemetry_replay_restores_missing_envelopes_idempotently(pilot, monkeypatch):
