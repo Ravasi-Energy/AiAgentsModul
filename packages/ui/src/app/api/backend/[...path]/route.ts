@@ -68,6 +68,11 @@ async function proxy(req: NextRequest, params: { path: string[] }): Promise<Resp
   // above).
   const callerEmail = session.user.email?.toLowerCase();
   if (callerEmail) {
+    const proxySecret = process.env.BACKEND_PROXY_SECRET;
+    if (!proxySecret || proxySecret === BACKEND_SHARED_SECRET) {
+      return Response.json({ error: "delegated_identity_not_configured" }, { status: 503 });
+    }
+    headers.set("x-caller-proxy-secret", proxySecret);
     headers.set("x-caller-email", callerEmail);
   }
 

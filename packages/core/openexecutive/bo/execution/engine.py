@@ -64,6 +64,24 @@ def enabled(tenant: str, db_path: Path | None = None) -> bool:
     return bool(_setting(tenant, "bo.exec.enabled", False, db_path))
 
 
+def assert_effect_authority(tenant: str, mandate_id: str, *,
+                            step_action: str | None = None,
+                            step_resource: str | None = None,
+                            db_path: Path | None = None) -> None:
+    """Common UI/worker authority, including every delegated constraint."""
+    from openexecutive.bo.execution import guardian
+    if not enabled(tenant, db_path=db_path):
+        raise ExecutionDisabledError("execuția delegată este oprită")
+    chain = store.mandate_chain(tenant, mandate_id, db_path=db_path)
+    for link in chain:
+        assert_active(link)
+    for link in chain:
+        guardian.assert_effect_authorized(
+            tenant, link, step_action=step_action,
+            step_resource=step_resource, db_path=db_path,
+        )
+
+
 # --------------------------------------------------------------------------- #
 # Submission
 # --------------------------------------------------------------------------- #
@@ -109,6 +127,9 @@ def submit_execution(
             assert_active(link)
     except (MandateRevokedError, MandateExpiredError) as exc:
         raise store.InvalidStateError(str(exc)) from exc
+    if len(steps) > int(_setting(tenant, "bo.exec.max_steps", 100, db_path)):
+        from openexecutive.bo.execution.mandate import MandateValidationError
+        raise MandateValidationError("numărul de pași depășește bo.exec.max_steps")
     slots = min(
         int(_setting(tenant, "bo.exec.default_concurrency", 2, db_path)),
         mandate.concurrency_limit,
@@ -142,6 +163,8 @@ def work_once(
     Returns what was claimed and each run's outcome — the caller (API
     route, CLI probe, second process) controls scheduling."""
     worker_id = worker_id or f"wrk_{uuid.uuid4().hex[:12]}"
+    if not enabled(tenant, db_path=db_path):
+        return {"worker_id": worker_id, "claimed": 0, "outcomes": []}
     lease_s = int(_setting(tenant, "bo.exec.lease_seconds", 60, db_path))
     claimed = store.claim_runs(
         tenant, worker_id=worker_id, limit=limit, lease_s=lease_s,
@@ -223,7 +246,7 @@ def execute_run(
                     reason="cancelled_by_operator", db_path=db_path,
                 )
                 return {"run_id": run_id, "state": store.RUN_CANCELLED}
-            if fresh["pause_requested"]:
+            if fresh["pause_requested"] or not enabled(tenant, db_path=db_path):
                 transition(store.RUN_PAUSED, clear_lease=True)
                 _emit_checkpoint(
                     tenant, fresh, mandate, step=step_idx, state="PENDING",
@@ -249,8 +272,8 @@ def execute_run(
                 from openexecutive.bo.execution import guardian
                 step_def = fresh["steps"][step_idx]
                 try:
-                    guardian.assert_effect_authorized(
-                        tenant, mandate,
+                    assert_effect_authority(
+                        tenant, mandate.mandate_id,
                         step_action=step_def.get("action"),
                         step_resource=step_def.get("resource"),
                         db_path=db_path,
@@ -438,6 +461,7 @@ def _execute_step(
             # The effect provably happened — finalize, no re-execution.
             store.mark_ledger_status(
                 tenant, entry["entry_id"], store.LED_SUCCEEDED,
+                expected_fence=entry["fence_version"],
                 receipt_ref=receipt["receipt_ref"], receipt=receipt,
                 db_path=db_path,
             )
@@ -454,6 +478,7 @@ def _execute_step(
             # double the effect. Surface it, don't guess.
             store.mark_ledger_status(
                 tenant, entry["entry_id"], store.LED_RECONCILIATION,
+                expected_fence=entry["fence_version"],
                 db_path=db_path,
             )
             return {
@@ -470,6 +495,7 @@ def _execute_step(
         if int(entry["attempts"]) >= max_attempts:
             store.mark_ledger_status(
                 tenant, entry["entry_id"], store.LED_RECONCILIATION,
+                expected_fence=entry["fence_version"],
                 db_path=db_path,
             )
             return {
@@ -590,10 +616,7 @@ def resume_run(
             f"{len(unresolved)} efecte cer reconciliere explicită "
             f"înainte de reluare"
         )
-    store.transition_run(
-        tenant, run_id, store.RUN_PENDING, clear_lease=True,
-        clear_flags=True, db_path=db_path,
-    )
+    store.resume_reserved_run(tenant, run_id, db_path=db_path)
     _audit(tenant, "bo_run_resume", {"run_id": run_id}, actor=actor)
     return store.get_run(tenant, run_id, db_path=db_path)
 
@@ -632,6 +655,7 @@ def reconcile_run(
             if receipt is not None:
                 store.mark_ledger_status(
                     tenant, entry["entry_id"], store.LED_SUCCEEDED,
+                expected_fence=entry["fence_version"],
                     receipt_ref=receipt["receipt_ref"], receipt=receipt,
                     db_path=db_path,
                 )
@@ -639,12 +663,14 @@ def reconcile_run(
             else:
                 store.mark_ledger_status(
                     tenant, entry["entry_id"], store.LED_RECONCILIATION,
+                expected_fence=entry["fence_version"],
                     db_path=db_path,
                 )
                 pending += 1
         elif resolution == "mark_failed":
             store.mark_ledger_status(
-                tenant, entry["entry_id"], store.LED_INTENT, db_path=db_path,
+                tenant, entry["entry_id"], store.LED_INTENT,
+                expected_fence=entry["fence_version"], db_path=db_path,
             )
             resolved += 1
         else:

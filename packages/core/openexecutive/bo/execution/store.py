@@ -46,7 +46,7 @@ RUN_RECONCILIATION = "RECONCILIATION_REQUIRED"
 RUN_CANCELLED = "CANCELLED"
 
 RUN_STATES = frozenset({
-    RUN_PENDING, RUN_CLAIMED, RUN_RUNNING, RUN_PAUSED, RUN_SUCCEEDED,
+    RUN_PENDING, RUN_CLAIMED, RUN_RUNNING, RUN_SUCCEEDED,
     RUN_FAILED, RUN_UNKNOWN, RUN_RECONCILIATION, RUN_CANCELLED,
 })
 
@@ -593,22 +593,42 @@ def _reserve_budget(
     same mandate — two concurrent submitters cannot both pass when the
     remaining allowance only fits one.
     """
-    row = conn.execute(
-        "SELECT COALESCE(SUM(CAST(amount AS REAL)), 0) AS used_amount, "
-        "COALESCE(SUM(slots), 0) AS used_slots "
-        "FROM bo_budget_reservations "
-        "WHERE tenant = ? AND mandate_id = ? AND state = ?",
-        (tenant, mandate.mandate_id, RES_RESERVED),
+    # Check each ancestor against reservations in its entire subtree. This
+    # also covers pre-upgrade reservations without duplicating ledger rows.
+    link = mandate
+    while True:
+        rows = conn.execute(
+            "WITH RECURSIVE descendants(id) AS (SELECT ? UNION ALL "
+            "SELECT m.mandate_id FROM bo_exec_mandates m JOIN descendants d "
+            "ON m.parent_mandate_id = d.id WHERE m.tenant = ?) "
+            "SELECT amount, slots, state FROM bo_budget_reservations "
+            "WHERE tenant = ? AND mandate_id IN (SELECT id FROM descendants) "
+            "AND run_id != ? AND state != ?",
+            (link.mandate_id, tenant, tenant, run_id, RES_RELEASED),
+        ).fetchall()
+        used = sum((Decimal(r["amount"]) for r in rows), Decimal(0))
+        occupied = sum(r["slots"] for r in rows if r["state"] == RES_RESERVED)
+        if used + amount > link.budget_limit:
+            raise BudgetExceededError("bugetul agregat al lanțului este epuizat")
+        if occupied + slots > link.concurrency_limit:
+            raise BudgetExceededError("concurența agregată a lanțului este epuizată")
+        if link.parent_mandate_id is None:
+            break
+        link = _mandate_from_row(conn.execute(
+            "SELECT * FROM bo_exec_mandates WHERE tenant = ? AND mandate_id = ?",
+            (tenant, link.parent_mandate_id),
+        ).fetchone())
+    existing = conn.execute(
+        "SELECT reservation_id FROM bo_budget_reservations WHERE tenant = ? AND run_id = ?",
+        (tenant, run_id),
     ).fetchone()
-    if Decimal(str(row["used_amount"])) + amount > mandate.budget_limit:
-        raise BudgetExceededError(
-            f"rezervarea {amount} depășește bugetul disponibil al mandatului"
+    if existing:
+        conn.execute(
+            "UPDATE bo_budget_reservations SET state = ?, slots = ?, updated_at = ? "
+            "WHERE tenant = ? AND run_id = ?",
+            (RES_RESERVED, slots, now, tenant, run_id),
         )
-    if int(row["used_slots"]) + slots > mandate.concurrency_limit:
-        raise BudgetExceededError(
-            f"sloturile {slots} depășesc concurența mandatului "
-            f"({mandate.concurrency_limit})"
-        )
+        return
     conn.execute(
         """
         INSERT INTO bo_budget_reservations (
@@ -626,11 +646,50 @@ def _reserve_budget(
 def settle_reservation(
     conn: Any, tenant: str, run_id: str, state: str, now: str
 ) -> None:
+    if state == RES_RELEASED:
+        evidence = conn.execute(
+            "SELECT status FROM bo_effect_ledger WHERE tenant = ? AND run_id = ?",
+            (tenant, run_id),
+        ).fetchall()
+        if any(r["status"] in (LED_SUBMITTED, LED_UNKNOWN, LED_RECONCILIATION)
+               for r in evidence):
+            state = "EXPOSED"  # budget retained, execution slot released
+        elif any(r["status"] == LED_SUCCEEDED for r in evidence):
+            state = RES_COMMITTED
     conn.execute(
         "UPDATE bo_budget_reservations SET state = ?, updated_at = ? "
         "WHERE tenant = ? AND run_id = ? AND state = ?",
         (state, now, tenant, run_id, RES_RESERVED),
     )
+
+
+def resume_reserved_run(tenant: str, run_id: str, *, db_path: Path | None = None) -> None:
+    with get_conn(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT * FROM bo_exec_runs WHERE tenant = ? AND run_id = ?",
+                           (tenant, run_id)).fetchone()
+        if row is None:
+            raise NotFoundError(run_id)
+        if row["cancel_requested"] or not (
+            row["state"] in (RUN_PAUSED, RUN_UNKNOWN, RUN_RECONCILIATION)
+            or (row["state"] in (RUN_CLAIMED, RUN_RUNNING)
+                and (row["lease_until"] is None or row["lease_until"] < _now()))
+        ):
+            raise InvalidStateError("rularea nu poate fi reluată")
+        if conn.execute("SELECT 1 FROM bo_effect_ledger WHERE tenant = ? AND run_id = ? AND status = ?",
+                        (tenant, run_id, LED_RECONCILIATION)).fetchone():
+            raise InvalidStateError("reconciliere necesară")
+        mandate = _mandate_from_row(conn.execute(
+            "SELECT * FROM bo_exec_mandates WHERE tenant = ? AND mandate_id = ?",
+            (tenant, row["mandate_id"]),
+        ).fetchone())
+        _reserve_budget(conn, tenant, mandate, run_id, Decimal(row["budget_reserved"]),
+                        row["concurrency_slots"], _now())
+        conn.execute(
+            "UPDATE bo_exec_runs SET state = ?, pause_requested = 0, lease_owner = NULL, "
+            "lease_until = NULL, lease_seq = lease_seq + 1, updated_at = ? WHERE tenant = ? AND run_id = ?",
+            (RUN_PENDING, _now(), tenant, run_id),
+        )
 
 
 def get_run(tenant: str, run_id: str, db_path: Path | None = None) -> dict[str, Any]:
@@ -687,13 +746,13 @@ def claim_runs(
             WHERE tenant = ?
               AND (
                 state = ?
-                OR (state IN (?, ?, ?)
+                OR (state IN (?, ?)
                     AND (lease_until IS NULL OR lease_until < ?))
               )
               AND cancel_requested = 0 AND pause_requested = 0
             ORDER BY created_at LIMIT ?
             """,
-            (tenant, RUN_PENDING, RUN_CLAIMED, RUN_RUNNING, RUN_PAUSED,
+            (tenant, RUN_PENDING, RUN_CLAIMED, RUN_RUNNING,
              now, limit),
         ).fetchall()
         for row in rows:
@@ -798,6 +857,15 @@ def request_flag(
             "WHERE tenant = ? AND run_id = ?",
             (_now(), tenant, run_id),
         )
+        if row["state"] in (RUN_PENDING, RUN_PAUSED):
+            state = RUN_CANCELLED if flag == "cancel_requested" else RUN_PAUSED
+            conn.execute(
+                "UPDATE bo_exec_runs SET state = ?, lease_owner = NULL, "
+                "lease_until = NULL, lease_seq = lease_seq + 1 WHERE tenant = ? AND run_id = ?",
+                (state, tenant, run_id),
+            )
+            if state == RUN_CANCELLED:
+                settle_reservation(conn, tenant, run_id, RES_RELEASED, _now())
     _audit(tenant, f"bo_run_{flag.removesuffix('_requested')}", {
         "run_id": run_id,
         "reason": (reason or "")[:300] or None,
@@ -1085,7 +1153,7 @@ def finalize_ledger_entry(
             "UPDATE bo_effect_ledger SET status = ?, receipt_ref = ?, "
             "receipt_json = ?, lease_owner = NULL, lease_until = NULL, "
             "finalized_at = ? WHERE tenant = ? AND entry_id = ? "
-            "AND fence_version = ?",
+            "AND fence_version = ? AND status = 'SUBMITTED' AND lease_owner IS NOT NULL",
             (
                 status, receipt_ref,
                 json.dumps(receipt) if receipt is not None else None,
@@ -1100,6 +1168,7 @@ def mark_ledger_status(
     entry_id: str,
     status: str,
     *,
+    expected_fence: int | None = None,
     receipt_ref: str | None = None,
     receipt: dict[str, Any] | None = None,
     db_path: Path | None = None,
@@ -1109,8 +1178,18 @@ def mark_ledger_status(
     crashed worker left UNKNOWN."""
     with get_conn(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT status, fence_version FROM bo_effect_ledger WHERE tenant = ? AND entry_id = ?",
+            (tenant, entry_id),
+        ).fetchone()
+        if row is None:
+            raise NotFoundError(entry_id)
+        if row["status"] not in (LED_UNKNOWN, LED_SUBMITTED, LED_RECONCILIATION):
+            raise ConflictError("efectul nu mai este reconciliabil")
+        if expected_fence is not None and row["fence_version"] != expected_fence:
+            raise ConflictError("reconciliere depășită (fencing)")
         conn.execute(
-            "UPDATE bo_effect_ledger SET status = ?, receipt_ref = "
+            "UPDATE bo_effect_ledger SET fence_version = fence_version + 1, status = ?, receipt_ref = "
             "COALESCE(?, receipt_ref), receipt_json = "
             "COALESCE(?, receipt_json), lease_owner = NULL, "
             "lease_until = NULL, finalized_at = COALESCE(finalized_at, ?) "

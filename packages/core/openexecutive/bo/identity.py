@@ -23,6 +23,7 @@ identity.
 from __future__ import annotations
 
 import os
+import hmac
 import re
 from dataclasses import dataclass
 from typing import Literal
@@ -142,6 +143,14 @@ def resolve_identity(request: Request) -> Identity:
 
     email = (request.headers.get("x-caller-email") or "").strip().lower()
     if email:
+        # A service key never authenticates a delegated user. The session
+        # proxy must also hold a distinct, server-only delegation credential.
+        proxy_secret = os.environ.get("BACKEND_PROXY_SECRET", "")
+        supplied = request.headers.get("x-caller-proxy-secret", "")
+        service_secret = os.environ.get("BACKEND_SHARED_SECRET", "")
+        if (not proxy_secret or proxy_secret == service_secret
+                or not hmac.compare_digest(supplied, proxy_secret)):
+            raise UnauthenticatedError("untrusted delegated identity")
         role: Role = (
             "admin" if email in _admin_emails() or _is_principal_email(email) else "viewer"
         )

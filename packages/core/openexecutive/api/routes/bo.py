@@ -815,11 +815,15 @@ def run_authority(run_id: str, ident: BoIdentity) -> Any:
     )
     summary = _guardian_summary(tenant, mandate)
     try:
-        exec_guardian.assert_effect_authorized(
-            tenant, mandate,
+        exec_engine.assert_effect_authority(
+            tenant, mandate.mandate_id,
             step_action=step.get("action") if step else None,
             step_resource=step.get("resource") if step else None,
         )
+    except (exec_engine.ExecutionDisabledError,
+            exec_engine.MandateRevokedError, exec_engine.MandateExpiredError) as exc:
+        return {"authorized": False, "mode": "denied", "kind": "local_authority",
+                "detail": str(exc), "guardian": summary}
     except exec_guardian.GuardianDeniedError as exc:
         return {
             "authorized": False, "mode": "denied",
