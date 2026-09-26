@@ -171,7 +171,7 @@ outbox bytes; only the previously PENDING run submits after recovery.
 
 A read-only Hire issue is reported for the owner: at 1286fed, an APPLIED readback
 with operationId but missing key/digest remains APPLIED although identity_valid
-is false (`connectors/base.py:137–162`); `executor/outbox.py:405` promotes APPLIED
+is false (`connectors/base.py:137–162`); `executor/outbox.py:410` promotes APPLIED
 to DONE without that guard. BOAgents does not consume Hire's provider readback;
 this issue limits the shared candidate gate, not its local synthetic receipt
 lookup. The owner/coordinator must resolve or disposition it. No Hire or Guardian
