@@ -18,7 +18,7 @@ export class BoApiError extends Error {
   }
 }
 
-async function req<T>(
+export async function req<T>(
   path: string,
   init?: RequestInit,
 ): Promise<T> {

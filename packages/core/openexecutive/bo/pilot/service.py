@@ -123,6 +123,7 @@ def submit(identity, mandate_id, correlation_id=None, db_path=None):
     return engine.submit_execution(identity.tenant, mandate_id,
         [{"action": ACTION, "resource": RESOURCE, "payload": {
             "amount": 1, "activation_version": active["version"],
+            "endpoint": config["endpoint"],
             "config_hash": config_hash(config), "manifest_digest": row["manifest_digest"],
         }}], budget_amount=Decimal("1"), correlation_id=correlation_id,
         actor=identity.actor, db_path=db_path)

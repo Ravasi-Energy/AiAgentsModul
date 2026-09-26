@@ -93,13 +93,15 @@ def server(db_path, tokens, port=0):
                 conn.row_factory = sqlite3.Row
                 conn.execute("BEGIN IMMEDIATE")
                 if self.path == "/scenario" and post:
-                    if body.get("scenario") not in ("healthy", "delayed", "unknown", "recover"):
+                    if body.get("scenario") not in ("healthy", "delayed", "unknown", "recover", "unavailable"):
                         return self.reply(422, {})
                     conn.execute("INSERT INTO modes VALUES (?,?) ON CONFLICT(tenant) DO UPDATE SET mode=excluded.mode", (tenant, body["scenario"]))
                     conn.commit()
                     return self.reply(200, {"synthetic": True})
                 mode_row = conn.execute("SELECT mode FROM modes WHERE tenant=?", (tenant,)).fetchone()
                 mode = mode_row[0] if mode_row else "healthy"
+                if mode == "unavailable" and self.path != "/stats":
+                    return self.reply(503, {"error": "synthetic_service_unavailable"})
                 if self.path == "/stats" and not post:
                     row = conn.execute("SELECT COUNT(*) AS n, COALESCE(SUM(calls),0) AS calls FROM effects WHERE tenant=?", (tenant,)).fetchone()
                     return self.reply(200, {"effectCount": row["n"], "submitCalls": row["calls"]})
@@ -109,9 +111,11 @@ def server(db_path, tokens, port=0):
                     row = conn.execute("SELECT result FROM effects WHERE tenant=? AND key=?", (tenant, key)).fetchone()
                     result = json.loads(row[0]) if row else {}
                 elif self.path == "/probe" and post:
-                    required = {"idempotencyKey", "payloadDigest", "executionRef", "correlationId", "producerId", "installationId"}
+                    required = {"tenantRef", "idempotencyKey", "payloadDigest", "executionRef", "correlationId", "producerId", "installationId"}
                     if set(body) != required or not all(isinstance(v, str) and 0 < len(v) <= 128 for v in body.values()):
                         return self.reply(422, {})
+                    if body["tenantRef"] != tenant:
+                        return self.reply(403, {"error": "tenant_mismatch"})
                     row = conn.execute("SELECT * FROM effects WHERE tenant=? AND key=?", (tenant, body["idempotencyKey"])).fetchone()
                     if row and row["digest"] != body["payloadDigest"]:
                         return self.reply(409, {"error": "payload_conflict"})

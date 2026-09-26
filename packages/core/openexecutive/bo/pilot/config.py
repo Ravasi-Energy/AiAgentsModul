@@ -3,6 +3,7 @@ import json
 import re
 from urllib.parse import urlsplit
 
+
 def endpoint(value):
     from openexecutive.bo.settings.registry import SettingValidationError
     if value == "":

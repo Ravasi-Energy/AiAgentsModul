@@ -30,8 +30,18 @@ class PilotProvider:
 
     def _request(self, path, body=None):
         try:
-            config, _, _ = service.guard(self.tenant, self.run["steps"][0]["payload"], self.db_path)
-            if config["supervision"] == "required" and not any(
+            if body is None:
+                # Readback is not a new effect: preserve recovery after uninstall.
+                from openexecutive.bo.pilot.config import endpoint
+                config = service.configuration(self.tenant, self.db_path)
+                target = endpoint(config["endpoint"])
+                if config["profile"] != "synthetic-loopback" or not target \
+                        or target not in json.loads(config["allowlist"]) \
+                        or target != self.run["steps"][0]["payload"].get("endpoint"):
+                    raise ProviderError("Readback cere endpointul original încă allowlisted")
+            else:
+                config, _, _ = service.guard(self.tenant, self.run["steps"][0]["payload"], self.db_path)
+            if body is not None and config["supervision"] == "required" and not any(
                 m.guardian_ref for m in store.mandate_chain(self.tenant, self.run["mandate_id"], db_path=self.db_path)
             ):
                 raise ProviderError("Autoritate Guardian obligatorie pentru pilot")
@@ -103,6 +113,7 @@ class PilotProvider:
         if tenant != self.tenant or amount != 1:
             raise ProviderError("Scope diagnostic invalid")
         response = self._request("/probe", {
+            "tenantRef": tenant,
             "idempotencyKey": idempotency_key, "payloadDigest": payload_digest,
             "executionRef": self.run["run_id"], "correlationId": self.run["correlation_id"],
             "producerId": os.environ.get("BO_TELEMETRY_PRODUCER_ID", "boagents"),

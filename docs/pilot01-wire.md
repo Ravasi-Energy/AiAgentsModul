@@ -27,7 +27,7 @@ operații UNKNOWN. Tokenii sunt exclusiv environment:
 - `BO_PILOT_GUARDIAN_MANDATE`: mandat Guardian provisionat de owner, drept exact
   `diagnose` / `synth.erp`, product `BOAgents`, tenant/installation identice.
 - `BO_GUARDIAN_TOKEN`: autoritate/receipts conform contractului existent.
-- `BO_PILOT_OBSERVATION_TOKEN`: `inventory:write` pentru observații.
+- `BO_PILOT_OBSERVATION_TOKEN`: `modelobs:write` pentru observații.
 - `BO_TELEMETRY_TOKEN`, `BO_TELEMETRY_ENABLED`, `BO_TELEMETRY_PRODUCER_ID`,
   `BO_INSTALLATION_ID`: contractele existente de telemetrie.
 
@@ -51,7 +51,7 @@ numai ledgerul și receiptul corelat confirmă efectul.
 `python -m openexecutive.bo.pilot.fixture package --work DIR` generează pachet și
 registru. `serve --work DIR --port PORT` folosește `BO_PILOT_FIXTURE_TOKENS`:
 obiect JSON credential→tenant, exclusiv env. Nu loghează antete sau corpuri.
-`POST /probe` primește idempotencyKey,payloadDigest,executionRef,correlationId,
+`POST /probe` primește tenantRef (asertat și comparat cu credentialul), idempotencyKey,payloadDigest,executionRef,correlationId,
 producerId,installationId; tenantul derivă din credential. Persistă o singură
 probă per tenant+cheie; alt digest→409. Răspunsul conține observația comună și
 receiptul intern al providerului existent (effect_key,digest,receipt_ref,provider,
