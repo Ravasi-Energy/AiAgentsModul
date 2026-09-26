@@ -794,8 +794,8 @@ class TestWireContract:
 # --------------------------------------------------------------------------- #
 
 class TestRoutes:
-    ADMIN = {"x-caller-email": "admin@test"}
-    VIEWER = {"x-caller-email": "viewer@test"}
+    ADMIN = {"x-caller-email": "admin@test", "x-caller-proxy-secret": "test-proxy-only"}
+    VIEWER = {"x-caller-email": "viewer@test", "x-caller-proxy-secret": "test-proxy-only"}
 
     @pytest.fixture()
     def client(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -807,6 +807,7 @@ class TestRoutes:
         use_tmp_db(tmp_path, monkeypatch)
         monkeypatch.setenv("BO_TENANT_ID", "tenant-a")
         monkeypatch.setenv("BO_ADMIN_EMAILS", "admin@test")
+        monkeypatch.setenv("BACKEND_PROXY_SECRET", "test-proxy-only")
         app = FastAPI()
         app.include_router(bo_route.router)
         bo_route.register_error_handlers(app)

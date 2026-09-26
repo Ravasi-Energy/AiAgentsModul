@@ -39,6 +39,7 @@ import json
 import logging
 import os
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
@@ -233,7 +234,14 @@ def assert_effect_authorized(
             "credențialul Guardian lipsește — verificarea la frontieră "
             "e obligatorie pentru mandate legate"
         )
-    url = f"{endpoint}/v1/mandates/{guardian_ref}/status"
+    installation = os.environ.get("BO_INSTALLATION_ID", "local-installation")
+    query = {"product": "BOAgents", "installation": installation}
+    if step_action is not None:
+        query["action"] = step_action
+    if step_resource is not None:
+        query["resource"] = step_resource
+    url = (f"{endpoint}/v1/mandates/{urllib.parse.quote(guardian_ref, safe='')}/status?"
+           + urllib.parse.urlencode(query))
     try:
         status, body = _request("GET", url, token, timeout_s)
     except urllib.error.HTTPError as exc:
@@ -284,6 +292,20 @@ def assert_effect_authorized(
             f"mandatul {guardian_ref} are starea "
             f"{mandate_status or 'lipsă'} în Guardian",
         )
+    for key, expected in (("tenantRef", tenant), ("mandateId", guardian_ref),
+                          ("product", "BOAgents"), ("installationId", installation)):
+        if body.get(key) != expected:
+            raise GuardianDeniedError("authority_mismatch", f"autoritate necorespunzătoare: {key}")
+    allowed = body.get("allowed")
+    if not isinstance(allowed, dict) or any(
+        not isinstance(allowed.get(key), list) or
+        any(not isinstance(value, str) for value in allowed[key])
+        for key in ("actions", "resources")
+    ):
+        raise GuardianDeniedError("invalid_response", "drepturile mandatului lipsesc sau sunt invalide")
+    if ((step_action is not None and step_action not in allowed["actions"])
+            or (step_resource is not None and step_resource not in allowed["resources"])):
+        raise GuardianDeniedError("outside_mandate", "efectul nu este autorizat de mandatul Guardian")
     _assert_policy_rights(
         tenant, endpoint, timeout_s,
         step_action=step_action, step_resource=step_resource,
@@ -302,8 +324,8 @@ def _assert_policy_rights(
     the ACTIVE label on a mandate does not prove the policy still
     allows it.
 
-    Credential missing → layer skipped (documented limit, needs a
-    separately-provisioned scope). Credential present but refused → the
+    Credential missing → optional direct policy read skipped; the status
+    endpoint still checks the effective current policy. Credential refused → the
     rights cannot be verified → pause (unavailable), not proceed."""
     token = _policy_token(tenant, db_path)
     if not token:

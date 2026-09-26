@@ -13,6 +13,17 @@ Two independent layers. Either one alone would be insufficient; together they fa
 | **UI: Auth.js v5 + Google OAuth** | Anyone hitting the public UI is redirected to `/signin`. Only Google accounts on the allow-list can complete sign-in — the **union** of `ALLOWED_EMAILS` and the People roster (see below). | [packages/ui/src/auth.ts](../packages/ui/src/auth.ts), [packages/ui/src/middleware.ts](../packages/ui/src/middleware.ts), [packages/ui/src/app/signin/page.tsx](../packages/ui/src/app/signin/page.tsx) |
 | **API: shared-secret header** | The FastAPI backend is reachable over the network. It rejects every request whose `x-api-key` header doesn't match `BACKEND_SHARED_SECRET`. The UI proxy stamps this header on every upstream call. | [packages/core/openexecutive/api/main.py](../packages/core/openexecutive/api/main.py), [packages/ui/src/app/api/backend/[...path]/route.ts](../packages/ui/src/app/api/backend/%5B...path%5D/route.ts) |
 
+### Delegated BO user identity
+
+The session proxy and API must also share `BACKEND_PROXY_SECRET`, a separate
+server-only credential distinct from `BACKEND_SHARED_SECRET`. Generate a new
+random value and configure it on both processes; never expose it as a
+`NEXT_PUBLIC_*` variable or provision it to service clients. Restart both after
+rotation. The proxy strips incoming `x-caller-*` headers and stamps the session
+email and `x-caller-proxy-secret`. Missing/reused configuration returns 503 from
+the proxy; untrusted delegated identity returns 401 from BO routes. A service
+key by itself remains an operator and cannot write BO settings or mandates.
+
 ### Who is on the allow-list
 
 Two **additive** sources. An email is admitted if it appears in *either*:

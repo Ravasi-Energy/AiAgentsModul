@@ -116,7 +116,7 @@ function GuardianBlock({
       <div className="bo-row" style={{ marginTop: 6, flexWrap: "wrap" }}>
         {guardian.bound_ref ? (
           <Pill kind="info" icon="shield-check">
-            legat de Guardian: {guardian.bound_ref}
+            autorități Guardian: {(guardian.chain_refs ?? [guardian.bound_ref]).join(", ")}
           </Pill>
         ) : (
           <Pill kind="neutral" icon="info">
@@ -130,7 +130,7 @@ function GuardianBlock({
           credențial {guardian.credential_configured ? "prezent" : "lipsă"}
         </Pill>
         {guardian.policy_layer ? (
-          <Pill kind="info">strat drepturi efective</Pill>
+          <Pill kind="info">citire suplimentară a politicii</Pill>
         ) : null}
       </div>
       {guardian.bound_ref && !guardian.credential_configured ? (
@@ -570,7 +570,7 @@ function OutboxSection({
               <Pill kind={l.kind}>{l.label}</Pill>
               <span className="bo-hint">
                 {e.event_id.slice(0, 18)}… · {e.kind}/{e.event_type ?? "?"} ·
-                tentative {e.attempts}
+                tentative {e.series_attempts} în seria curentă · {e.attempts} total
                 {e.last_error ? ` · ${e.last_error.slice(0, 90)}` : ""}
               </span>
               <button
@@ -600,7 +600,7 @@ function OutboxSection({
                     maxHeight: 160, overflow: "auto",
                   }}
                 >
-                  {JSON.stringify(e.envelope, null, 2)}
+                  {JSON.stringify({ envelope: e.envelope, retry_history: e.retry_history }, null, 2)}
                 </pre>
               ) : null}
             </div>

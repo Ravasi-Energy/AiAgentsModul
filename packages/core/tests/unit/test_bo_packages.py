@@ -857,6 +857,7 @@ class TestRoutes:
         use_tmp_db(tmp_path, monkeypatch)
         monkeypatch.setenv("BO_TENANT_ID", "tenant-a")
         monkeypatch.setenv("BO_ADMIN_EMAILS", "admin@test")
+        monkeypatch.setenv("BACKEND_PROXY_SECRET", "test-proxy-only")
         monkeypatch.setenv("BO_PACKAGES_DIR", str(tmp_path / "quarantine"))
         capture_audit(monkeypatch)
         app = FastAPI()
@@ -864,8 +865,8 @@ class TestRoutes:
         bo_route.register_error_handlers(app)
         return TestClient(app)
 
-    ADMIN_H = {"x-caller-email": "admin@test"}
-    VIEWER_H = {"x-caller-email": "viewer@test"}
+    ADMIN_H = {"x-caller-email": "admin@test", "x-caller-proxy-secret": "test-proxy-only"}
+    VIEWER_H = {"x-caller-email": "viewer@test", "x-caller-proxy-secret": "test-proxy-only"}
 
     def _enable_api(self, client) -> None:
         for key, val in [

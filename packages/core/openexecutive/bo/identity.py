@@ -4,7 +4,8 @@ The host app has no tenant or role system of its own: sign-in happens in the
 Next.js layer (NextAuth), which stamps the verified caller email onto the
 upstream request as ``x-caller-email`` after stripping any client-supplied
 ``x-caller-*`` headers (see ``app/api/backend/[...path]/route.ts``). This
-adapter resolves that header — plus server-side configuration — into an
+adapter authenticates the separate BACKEND_PROXY_SECRET before resolving
+that header — plus server-side configuration — into an
 ``Identity`` the BO routes can authorize against.
 
 What this deliberately is NOT:
@@ -22,8 +23,8 @@ identity.
 """
 from __future__ import annotations
 
-import os
 import hmac
+import os
 import re
 from dataclasses import dataclass
 from typing import Literal
@@ -145,9 +146,9 @@ def resolve_identity(request: Request) -> Identity:
     if email:
         # A service key never authenticates a delegated user. The session
         # proxy must also hold a distinct, server-only delegation credential.
-        proxy_secret = os.environ.get("BACKEND_PROXY_SECRET", "")
+        proxy_secret = os.environ.get("BACKEND_PROXY_SECRET", "").strip()
         supplied = request.headers.get("x-caller-proxy-secret", "")
-        service_secret = os.environ.get("BACKEND_SHARED_SECRET", "")
+        service_secret = os.environ.get("BACKEND_SHARED_SECRET", "").strip()
         if (not proxy_secret or proxy_secret == service_secret
                 or not hmac.compare_digest(supplied, proxy_secret)):
             raise UnauthenticatedError("untrusted delegated identity")

@@ -127,7 +127,7 @@ def submit_execution(
             assert_active(link)
     except (MandateRevokedError, MandateExpiredError) as exc:
         raise store.InvalidStateError(str(exc)) from exc
-    if len(steps) > int(_setting(tenant, "bo.exec.max_steps", 100, db_path)):
+    if len(steps) > int(_setting(tenant, "bo.exec.max_steps", 50, db_path)):
         from openexecutive.bo.execution.mandate import MandateValidationError
         raise MandateValidationError("numărul de pași depășește bo.exec.max_steps")
     slots = min(
@@ -254,6 +254,29 @@ def execute_run(
                     reason="pause_requested", db_path=db_path,
                 )
                 return {"run_id": run_id, "state": store.RUN_PAUSED}
+            # 3. Mandatory checkpoint BEFORE the dependent step.
+            if checkpoint_required:
+                try:
+                    write_checkpoint(
+                        tenant, run_id, step_idx,
+                        {"phase": "pre", "step": step_idx,
+                         "action": fresh["steps"][step_idx]["action"],
+                         "resource": fresh["steps"][step_idx]["resource"]},
+                        db_path=db_path,
+                    )
+                except Exception as exc:  # noqa: BLE001 — any persistence
+                    try:                            # failure blocks the step
+                        transition(
+                            store.RUN_FAILED, clear_lease=True,
+                            block_reason=f"checkpoint_unavailable: {exc}"[:300],
+                            reservation_state=store.RES_RELEASED,
+                        )
+                    except store.ConflictError:
+                        return {"run_id": run_id, "state": "lost-claim"}
+                    return {
+                        "run_id": run_id, "state": store.RUN_FAILED,
+                        "block_reason": "checkpoint_unavailable",
+                    }
             # 2. Mandate chain re-check at the EFFECT boundary — local
             # chain first, then the Guardian-held status when the
             # mandate is bound to the Guardian authority (REM-01).
@@ -297,6 +320,11 @@ def execute_run(
                     }
                 except guardian.GuardianDeniedError as exc:
                     block = f"guardian_{exc.kind}: {exc}"
+                except (MandateRevokedError, MandateExpiredError) as exc:
+                    block = f"mandate_inactive: {exc}"
+                except ExecutionDisabledError:
+                    transition(store.RUN_PAUSED, clear_lease=True)
+                    return {"run_id": run_id, "state": store.RUN_PAUSED}
             if block is not None:
                 counts = store.ledger_counts(tenant, run_id, db_path=db_path)
                 state = (
@@ -320,34 +348,14 @@ def execute_run(
                 }
         except store.ConflictError:
             return {"run_id": run_id, "state": "lost-claim"}
-        # 3. Mandatory checkpoint BEFORE the dependent step.
-        if checkpoint_required:
-            try:
-                write_checkpoint(
-                    tenant, run_id, step_idx,
-                    {"phase": "pre", "step": step_idx,
-                     "action": fresh["steps"][step_idx]["action"],
-                     "resource": fresh["steps"][step_idx]["resource"]},
-                    db_path=db_path,
-                )
-            except Exception as exc:  # noqa: BLE001 — any persistence
-                try:                            # failure blocks the step
-                    transition(
-                        store.RUN_FAILED, clear_lease=True,
-                        block_reason=f"checkpoint_unavailable: {exc}"[:300],
-                        reservation_state=store.RES_RELEASED,
-                    )
-                except store.ConflictError:
-                    return {"run_id": run_id, "state": "lost-claim"}
-                return {
-                    "run_id": run_id, "state": store.RUN_FAILED,
-                    "block_reason": "checkpoint_unavailable",
-                }
         # 4 + 5. Ledger intent + effect.
-        outcome = _execute_step(
-            tenant, fresh, step_idx, provider,
-            worker_id=worker_id, lease_s=lease_s, db_path=db_path,
-        )
+        try:
+            outcome = _execute_step(
+                tenant, fresh, step_idx, provider,
+                worker_id=worker_id, lease_s=lease_s, db_path=db_path,
+            )
+        except store.ConflictError:
+            return {"run_id": run_id, "state": "lost-claim"}
         if outcome["terminal"] == "fenced":
             return {"run_id": run_id, "state": "lost-claim"}
         if outcome["terminal"] is not None:
@@ -355,7 +363,7 @@ def execute_run(
                 transition(
                     outcome["terminal"], clear_lease=True,
                     reservation_state=store.RES_RELEASED
-                    if outcome["terminal"] != store.RUN_SUCCEEDED else None,
+                    if outcome["terminal"] not in (store.RUN_SUCCEEDED, store.RUN_PAUSED) else None,
                     **({"block_reason": outcome["block_reason"]}
                        if outcome.get("block_reason") else {}),
                 )
@@ -429,6 +437,13 @@ def _execute_step(
     """Ledger + one provider call for step ``step``. Returns
     ``{"terminal": None, "ledger_status": ..., "receipt_ref": ...}`` to
     continue, or a terminal run state to stop."""
+    fresh = store.get_run(tenant, run["run_id"], db_path=db_path)
+    if fresh["lease_owner"] != worker_id or fresh["lease_seq"] != run["lease_seq"]:
+        return {"terminal": "fenced"}
+    if fresh["cancel_requested"]:
+        return {"terminal": store.RUN_CANCELLED}
+    if fresh["pause_requested"] or not enabled(tenant, db_path=db_path):
+        return {"terminal": store.RUN_PAUSED, "block_reason": "execution_disabled_or_paused"}
     step_desc = run["steps"][step]
     payload = step_desc.get("payload", {})
     try:
@@ -655,7 +670,7 @@ def reconcile_run(
             if receipt is not None:
                 store.mark_ledger_status(
                     tenant, entry["entry_id"], store.LED_SUCCEEDED,
-                expected_fence=entry["fence_version"],
+                    expected_fence=entry["fence_version"],
                     receipt_ref=receipt["receipt_ref"], receipt=receipt,
                     db_path=db_path,
                 )
@@ -663,7 +678,7 @@ def reconcile_run(
             else:
                 store.mark_ledger_status(
                     tenant, entry["entry_id"], store.LED_RECONCILIATION,
-                expected_fence=entry["fence_version"],
+                    expected_fence=entry["fence_version"],
                     db_path=db_path,
                 )
                 pending += 1
@@ -804,6 +819,7 @@ def _emit_checkpoint(
             state=state,
             policy_version=str(run["policy_version"]),
             lease=lease,
+            fencing_token=int(run["lease_seq"]),
             checkpoint_digest=(
                 f"sha256:{digest}" if digest and
                 not digest.startswith("sha256:") else digest

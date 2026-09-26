@@ -580,9 +580,15 @@ def _guardian_summary(tenant: str, mandate: Any | None = None) -> dict[str, Any]
     endpoint, token, _t, required = exec_guardian._link_config(
         tenant, None
     )
+    refs = []
+    if mandate is not None:
+        refs = list(dict.fromkeys(
+            link.guardian_ref for link in exec_store.mandate_chain(tenant, mandate.mandate_id)
+            if link.guardian_ref
+        ))
     return {
-        "bound_ref": getattr(mandate, "guardian_ref", None)
-        if mandate is not None else None,
+        "bound_ref": (getattr(mandate, "guardian_ref", None) or (refs[0] if refs else None)),
+        "chain_refs": refs,
         "endpoint_configured": bool(endpoint),
         "credential_configured": bool(token),
         "auth_required": required,
@@ -814,6 +820,9 @@ def run_authority(run_id: str, ident: BoIdentity) -> Any:
         else None
     )
     summary = _guardian_summary(tenant, mandate)
+    if run["cancel_requested"] or run["pause_requested"]:
+        return {"authorized": False, "mode": "denied", "kind": "run_control",
+                "detail": "rularea are o cerere de pauză/anulare", "guardian": summary}
     try:
         exec_engine.assert_effect_authority(
             tenant, mandate.mandate_id,

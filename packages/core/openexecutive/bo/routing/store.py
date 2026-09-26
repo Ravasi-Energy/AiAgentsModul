@@ -131,6 +131,14 @@ def initialize_db(db_path: Path | None = None) -> None:
             )
             """
         )
+        columns = {r[1] for r in conn.execute("PRAGMA table_info(bo_telemetry_outbox)")}
+        if "retry_base" not in columns:
+            conn.execute("ALTER TABLE bo_telemetry_outbox ADD COLUMN retry_base INTEGER NOT NULL DEFAULT 0")
+        conn.execute("""CREATE TABLE IF NOT EXISTS bo_outbox_retries (
+            tenant TEXT NOT NULL, event_id TEXT NOT NULL, series INTEGER NOT NULL,
+            attempts_before INTEGER NOT NULL, last_error TEXT, reason TEXT NOT NULL,
+            actor TEXT NOT NULL, created_at TEXT NOT NULL,
+            PRIMARY KEY (tenant, event_id, series))""")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS bo_outbox_pending "
             "ON bo_telemetry_outbox (tenant, delivered, lease_until)"
@@ -482,7 +490,7 @@ def claim_outbox(
         conn.execute("BEGIN IMMEDIATE")
         rows = conn.execute(
             """
-            SELECT event_id, kind, ref_id, envelope, attempts
+            SELECT event_id, kind, ref_id, envelope, attempts, retry_base
             FROM bo_telemetry_outbox
             WHERE tenant = ? AND delivered = 0
               AND (lease_until IS NULL OR lease_until < ?)
@@ -504,6 +512,7 @@ def claim_outbox(
             "ref_id": r["ref_id"],
             "envelope": json.loads(r["envelope"]),
             "attempts": int(r["attempts"]) + 1,
+            "series_attempts": int(r["attempts"]) + 1 - int(r["retry_base"]),
         }
         for r in rows
     ]
@@ -552,7 +561,7 @@ def list_outbox(
     envelope bytes are returned too — the UI shows the exact payload
     that would be re-sent (conflict/debugging surface)."""
     query = (
-        "SELECT event_id, kind, ref_id, envelope, created_at, attempts, "
+        "SELECT event_id, kind, ref_id, envelope, created_at, attempts, retry_base, "
         "delivered, last_error, lease_owner, lease_until "
         "FROM bo_telemetry_outbox WHERE tenant = ?"
     )
@@ -567,6 +576,13 @@ def list_outbox(
     params.append(limit)
     with get_conn(db_path) as conn:
         rows = conn.execute(query, params).fetchall()
+        histories = {}
+        for row in rows:
+            histories[row["event_id"]] = [dict(h) for h in conn.execute(
+                "SELECT series, attempts_before, last_error, reason, actor, created_at "
+                "FROM bo_outbox_retries WHERE tenant = ? AND event_id = ? ORDER BY series",
+                (tenant, row["event_id"]),
+            ).fetchall()]
     out = []
     for r in rows:
         try:
@@ -582,6 +598,8 @@ def list_outbox(
             "envelope": envelope,
             "created_at": r["created_at"],
             "attempts": int(r["attempts"]),
+            "series_attempts": int(r["attempts"]) - int(r["retry_base"]),
+            "retry_history": histories[r["event_id"]],
             "delivered": int(r["delivered"]),
             "last_error": r["last_error"],
             "lease_owner": r["lease_owner"],
@@ -603,10 +621,12 @@ def retry_outbox_entry(
     done. Byte-identical requeue: the persisted envelope is re-sent
     as-is, so a receiver-side dedup makes a second RECEIVED impossible
     to double-apply. Audited, reason mandatory."""
+    if not reason.strip():
+        raise ConflictError("motivul reluării este obligatoriu")
     with get_conn(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
-            "SELECT delivered FROM bo_telemetry_outbox "
+            "SELECT delivered, attempts, last_error FROM bo_telemetry_outbox "
             "WHERE tenant = ? AND event_id = ?",
             (tenant, event_id),
         ).fetchone()
@@ -618,7 +638,12 @@ def retry_outbox_entry(
                 "cele în așteptare/livrate nu se ating"
             )
         conn.execute(
-            "UPDATE bo_telemetry_outbox SET delivered = 0, "
+            "INSERT INTO bo_outbox_retries SELECT ?, ?, COALESCE(MAX(series), 0) + 1, ?, ?, ?, ?, ? "
+            "FROM bo_outbox_retries WHERE tenant = ? AND event_id = ?",
+            (tenant, event_id, row["attempts"], row["last_error"], reason[:300], actor, _now(), tenant, event_id),
+        )
+        conn.execute(
+            "UPDATE bo_telemetry_outbox SET delivered = 0, retry_base = attempts, "
             "lease_owner = NULL, lease_until = NULL "
             "WHERE tenant = ? AND event_id = ?",
             (tenant, event_id),

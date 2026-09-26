@@ -167,6 +167,10 @@
           "minLength": 1,
           "maxLength": 256,
           "pattern": "^[A-Za-z0-9_:. /-]+$"
+        },
+        "fencingToken": {
+          "type": "integer",
+          "minimum": 0
         }
       }
     },

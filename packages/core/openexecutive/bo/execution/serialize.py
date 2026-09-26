@@ -45,7 +45,7 @@ _ENVELOPE_KEYS = frozenset({
 })
 _CHECKPOINT_KEYS = frozenset({
     "executionRef", "mandateRef", "parentRef", "step", "state",
-    "policyVersion", "lease", "checkpointDigest", "failureReason",
+    "policyVersion", "lease", "fencingToken", "checkpointDigest", "failureReason",
 })
 _LEASE_KEYS = frozenset({"ownerRef", "fencingToken", "expiresAt"})
 _RECEIPT_KEYS = frozenset({
@@ -181,6 +181,7 @@ def build_checkpoint_event(
     state: str,
     policy_version: str,
     lease: dict[str, Any] | None = None,
+    fencing_token: int | None = None,
     checkpoint_digest: str | None = None,
     failure_reason: str | None = None,
     correlation_id: str,
@@ -227,6 +228,14 @@ def build_checkpoint_event(
             "fencingToken": token,
             "expiresAt": lease["expiresAt"],
         }
+    if fencing_token is None and lease is not None:
+        fencing_token = lease["fencingToken"]
+    if fencing_token is not None:
+        if type(fencing_token) is not int or fencing_token < 0:
+            raise ExecutionEventError("fencingToken: întreg ≥ 0")
+        if lease is not None and fencing_token != lease["fencingToken"]:
+            raise ExecutionEventError("epoca checkpointului diferă de lease")
+        body["fencingToken"] = fencing_token
     if checkpoint_digest is not None:
         body["checkpointDigest"] = checkpoint_digest
     if failure_reason is not None:

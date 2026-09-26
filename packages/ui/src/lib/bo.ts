@@ -559,6 +559,7 @@ export interface BoMandate {
 
 export interface BoGuardianInfo {
   bound_ref: string | null;
+  chain_refs: string[];
   endpoint_configured: boolean;
   credential_configured: boolean;
   auth_required: boolean;
@@ -768,6 +769,9 @@ export interface BoOutboxEntry {
   envelope: Record<string, unknown>;
   created_at: string;
   attempts: number;
+  series_attempts: number;
+  retry_history: { series: number; attempts_before: number; last_error: string | null;
+    reason: string; actor: string; created_at: string }[];
   delivered: number; // 0 pending · 1 livrat · 2 dead-letter
   last_error: string | null;
   lease_owner: string | null;

@@ -65,6 +65,7 @@ LEDGER_STATES = frozenset({
 RES_RESERVED = "RESERVED"
 RES_COMMITTED = "COMMITTED"
 RES_RELEASED = "RELEASED"
+RES_EXPOSED = "EXPOSED"
 
 
 class NotFoundError(KeyError):
@@ -229,6 +230,19 @@ def initialize_db(db_path: Path | None = None) -> None:
             "CREATE INDEX IF NOT EXISTS bo_budget_res_mandate "
             "ON bo_budget_reservations (tenant, mandate_id, state)"
         )
+        # Upgrade pre-remediation accounting without deleting evidence.
+        # Older workers released even ambiguous or partially executed runs.
+        for target, statuses in (
+            (RES_EXPOSED, (LED_SUBMITTED, LED_UNKNOWN, LED_RECONCILIATION)),
+            (RES_COMMITTED, (LED_SUCCEEDED,)),
+        ):
+            marks = ",".join("?" for _ in statuses)
+            conn.execute(
+                "UPDATE bo_budget_reservations AS r SET state = ? WHERE state = ? "
+                "AND EXISTS (SELECT 1 FROM bo_effect_ledger e WHERE e.tenant = r.tenant "
+                f"AND e.run_id = r.run_id AND e.status IN ({marks}))",
+                (target, RES_RELEASED, *statuses),
+            )
         # Synthetic provider state — the countable, persistent effect used
         # by probes. It is the provider's OWN truth, deliberately kept in
         # the same database file so restart/fencing tests exercise real
@@ -322,6 +336,7 @@ def create_mandate(
         check_child_intersection(parent, v)
         depth = parent.depth + 1
         parent_id = parent.mandate_id
+        guardian_ref = guardian_ref or parent.guardian_ref
     else:
         depth = 0
         parent_id = None
@@ -589,9 +604,8 @@ def _reserve_budget(
 ) -> None:
     """Atomic reservation inside the caller's BEGIN IMMEDIATE transaction.
 
-    Budget AND concurrency are checked against active reservations on the
-    same mandate — two concurrent submitters cannot both pass when the
-    remaining allowance only fits one.
+    Budget includes reserved, exposed and committed amounts. Concurrency
+    includes reserved slots only. Every ancestor bounds its whole subtree.
     """
     # Check each ancestor against reservations in its entire subtree. This
     # also covers pre-upgrade reservations without duplicating ledger rows.
@@ -653,7 +667,7 @@ def settle_reservation(
         ).fetchall()
         if any(r["status"] in (LED_SUBMITTED, LED_UNKNOWN, LED_RECONCILIATION)
                for r in evidence):
-            state = "EXPOSED"  # budget retained, execution slot released
+            state = RES_EXPOSED  # budget retained, execution slot released
         elif any(r["status"] == LED_SUCCEEDED for r in evidence):
             state = RES_COMMITTED
     conn.execute(
@@ -843,7 +857,7 @@ def request_flag(
     with get_conn(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
-            "SELECT state FROM bo_exec_runs WHERE tenant = ? AND run_id = ?",
+            "SELECT state, lease_until FROM bo_exec_runs WHERE tenant = ? AND run_id = ?",
             (tenant, run_id),
         ).fetchone()
         if row is None:
@@ -857,7 +871,10 @@ def request_flag(
             "WHERE tenant = ? AND run_id = ?",
             (_now(), tenant, run_id),
         )
-        if row["state"] in (RUN_PENDING, RUN_PAUSED):
+        if row["state"] in (RUN_PENDING, RUN_PAUSED) or (
+            row["state"] in (RUN_CLAIMED, RUN_RUNNING)
+            and (row["lease_until"] is None or row["lease_until"] < _now())
+        ):
             state = RUN_CANCELLED if flag == "cancel_requested" else RUN_PAUSED
             conn.execute(
                 "UPDATE bo_exec_runs SET state = ?, lease_owner = NULL, "
@@ -1173,19 +1190,24 @@ def mark_ledger_status(
     receipt: dict[str, Any] | None = None,
     db_path: Path | None = None,
 ) -> None:
-    """Administrative transition (reconciliation): writes are fenced only
-    by status legality, not worker ownership — an admin resolves what a
-    crashed worker left UNKNOWN."""
+    """CAS reconciliation of ambiguous evidence; invalidate the old worker.
+
+    A receipt can resolve an active claim, but declaring it unexecuted
+    requires its lease to expire. Terminal evidence cannot be overwritten.
+    """
     with get_conn(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
-            "SELECT status, fence_version FROM bo_effect_ledger WHERE tenant = ? AND entry_id = ?",
+            "SELECT status, fence_version, lease_until FROM bo_effect_ledger WHERE tenant = ? AND entry_id = ?",
             (tenant, entry_id),
         ).fetchone()
         if row is None:
             raise NotFoundError(entry_id)
         if row["status"] not in (LED_UNKNOWN, LED_SUBMITTED, LED_RECONCILIATION):
             raise ConflictError("efectul nu mai este reconciliabil")
+        if (status == LED_INTENT and row["status"] == LED_SUBMITTED
+                and row["lease_until"] and row["lease_until"] > _now()):
+            raise ConflictError("un worker activ nu poate fi declarat neexecutat")
         if expected_fence is not None and row["fence_version"] != expected_fence:
             raise ConflictError("reconciliere depășită (fencing)")
         conn.execute(

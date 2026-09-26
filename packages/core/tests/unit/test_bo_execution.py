@@ -478,7 +478,7 @@ class TestExecution:
         assert fresh["state"] == store.RUN_FAILED
         assert store.reservation_for(
             TENANT, run["run_id"]
-        )["state"] == store.RES_RELEASED
+        )["state"] == store.RES_COMMITTED
 
     def test_revocation_transitive_blocks_child_run(self, db: Path) -> None:
         _enable()
@@ -706,7 +706,7 @@ class TestCrashRecovery:
         assert prov.total(TENANT) == 3  # step 0's effect stays
         assert store.reservation_for(
             TENANT, run["run_id"]
-        )["state"] == store.RES_RELEASED
+        )["state"] == store.RES_COMMITTED
 
 
 # --------------------------------------------------------------------------- #
@@ -842,8 +842,8 @@ class TestLedgerSemantics:
             TENANT, run, 0, provider="synth.counter",
             payload={"amount": 2},
         )
-        store.mark_ledger_status(
-            TENANT, entry["entry_id"], store.LED_SUBMITTED,
+        store.claim_ledger_entry(
+            TENANT, entry["entry_id"], worker_id="crashed", lease_s=1,
         )
         out = _work(prov)
         assert out["outcomes"][0]["state"] == store.RUN_SUCCEEDED
@@ -1090,6 +1090,15 @@ class TestExecutionEvents:
 # Guardian linkage — live mandate status at the effect boundary
 # --------------------------------------------------------------------------- #
 
+def _guardian_active(url: str) -> dict[str, Any]:
+    from urllib.parse import unquote, urlsplit
+    ref = unquote(urlsplit(url).path.split("/mandates/")[1].removesuffix("/status"))
+    return {"status": "ACTIVE", "expiresAt": FUTURE, "tenantRef": TENANT,
+            "mandateId": ref, "product": "BOAgents", "installationId": "local-installation",
+            "allowed": {"actions": ["increment", "effect.intent"],
+                        "resources": ["synth.counter", "tool:counter.increment"]}}
+
+
 class TestGuardianLink:
     def _link(self, required: bool = True) -> None:
         settings_store.set_value(
@@ -1106,10 +1115,10 @@ class TestGuardianLink:
         """Fake the Guardian status endpoint via _request."""
         def fake(method: str, url: str, token: str, timeout: float,
                  body_arg: Any = None) -> tuple[int, dict[str, Any]]:
-            assert "/v1/mandates/" in url and url.endswith("/status")
+            assert "/v1/mandates/" in url and url.split("?")[0].endswith("/status")
             if error is not None:
                 raise error
-            return 200, body or {"status": "ACTIVE", "expiresAt": FUTURE}
+            return 200, body or _guardian_active(url)
         return fake
 
     def test_unbound_mandate_denied_when_required(
@@ -1270,7 +1279,7 @@ class TestGuardianLink:
         def spy(method: str, url: str, token: str, timeout: float,
                 body_arg: Any = None) -> tuple[int, dict[str, Any]]:
             calls.append(url)
-            return 200, {"status": "ACTIVE", "expiresAt": FUTURE}
+            return 200, _guardian_active(url)
 
         monkeypatch.setattr(guardian, "_request", spy)
         m = _mandate(guardian_ref="mnd_g1")
@@ -1344,7 +1353,7 @@ class TestGuardianLink:
             if "/v1/exec-policies" in url:
                 return 200, {"exists": True, "revoked": True,
                              "policy": {}}
-            return 200, {"status": "ACTIVE", "expiresAt": FUTURE}
+            return 200, _guardian_active(url)
 
         monkeypatch.setattr(guardian, "_request", fake)
         m = _mandate(guardian_ref="mnd_g1")
@@ -1372,7 +1381,7 @@ class TestGuardianLink:
                                  "allowedActions": ["read"],
                                  "allowedResources":
                                      ["tool:catalog.read"]}}
-            return 200, {"status": "ACTIVE", "expiresAt": FUTURE}
+            return 200, _guardian_active(url)
 
         monkeypatch.setattr(guardian, "_request", fake)
         m = _mandate(guardian_ref="mnd_g1")
@@ -1400,7 +1409,7 @@ class TestGuardianLink:
                                  "allowedActions": ["effect.intent"],
                                  "allowedResources":
                                      ["tool:counter.increment"]}}
-            return 200, {"status": "ACTIVE", "expiresAt": FUTURE}
+            return 200, _guardian_active(url)
 
         monkeypatch.setattr(guardian, "_request", fake)
         m = _mandate(guardian_ref="mnd_g1")
@@ -1429,7 +1438,7 @@ class TestGuardianLink:
                 raise urllib.error.HTTPError(
                     url, 403, "denied", {},
                     io.BytesIO(b'{"detail":"missing_scope"}'))
-            return 200, {"status": "ACTIVE", "expiresAt": FUTURE}
+            return 200, _guardian_active(url)
 
         monkeypatch.setattr(guardian, "_request", fake)
         m = _mandate(guardian_ref="mnd_g1")
@@ -1443,8 +1452,8 @@ class TestGuardianLink:
 # --------------------------------------------------------------------------- #
 
 class TestRoutes:
-    ADMIN = {"x-caller-email": "admin@test"}
-    VIEWER = {"x-caller-email": "viewer@test"}
+    ADMIN = {"x-caller-email": "admin@test", "x-caller-proxy-secret": "test-proxy-only"}
+    VIEWER = {"x-caller-email": "viewer@test", "x-caller-proxy-secret": "test-proxy-only"}
 
     @pytest.fixture()
     def client(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -1456,6 +1465,7 @@ class TestRoutes:
         use_tmp_db(tmp_path, monkeypatch)
         monkeypatch.setenv("BO_TENANT_ID", "tenant-a")
         monkeypatch.setenv("BO_ADMIN_EMAILS", "admin@test")
+        monkeypatch.setenv("BACKEND_PROXY_SECRET", "test-proxy-only")
         app = FastAPI()
         app.include_router(bo_route.router)
         bo_route.register_error_handlers(app)

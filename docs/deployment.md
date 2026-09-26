@@ -78,6 +78,7 @@ with "no company profile" on a fresh volume is expected, not a fault.
 | Variable | Why |
 |---|---|
 | `ANTHROPIC_API_KEY` | Every agent call. The app will not start without it. |
+| `BACKEND_PROXY_SECRET` | Separate server-only delegation credential on API and UI, distinct from the service key. Required for signed-in BO users; see auth.md. |
 | `BACKEND_SHARED_SECRET` | Gates every API route via `x-api-key`. Generate with `openssl rand -hex 32`; the UI needs the same value. |
 | `OE_PUBLIC_DEPLOYMENT=1` | **Set this on every internet-reachable instance.** See below. |
 | `BACKEND_ALLOWED_ORIGINS` | Comma-separated UI origins allowed through CORS, e.g. `https://exec.example.com`. |

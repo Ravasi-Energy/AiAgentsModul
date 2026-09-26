@@ -83,7 +83,7 @@ def deliver_pending(
         db_path=db_path,
     )
     for row in claimed:
-        if row["attempts"] > max_attempts:
+        if row["series_attempts"] > max_attempts:
             store.resolve_outbox(
                 tenant, row["event_id"], kind=row["kind"],
                 ref_id=row["ref_id"], error="attempt cap reached",
