@@ -23,6 +23,15 @@ type LoadState =
   | { kind: "forbidden" }
   | { kind: "data"; data: BoSettingsResponse; telemetry: BoTelemetryStatus | null };
 
+// Gruparea pe taburi — registrul marchează fiecare parametru; tabul
+// „exec" e suprafața de execuție/recuperare cerută de VAL4-03.
+const TAB_ORDER = ["general", "routing", "exec"] as const;
+const TAB_LABEL: Record<string, string> = {
+  general: "General",
+  routing: "Rutare modele",
+  exec: "Execuție și recuperare",
+};
+
 function SettingEditor({
   setting,
   canEdit,
@@ -62,7 +71,7 @@ function SettingEditor({
         kind: "ok",
         text: res.applied
           ? "Salvat și aplicat imediat."
-          : "Salvat — se aplică la următoarea simulare.",
+          : `Salvat. ${setting.effect_ro}`,
       });
     } catch (err) {
       if (err instanceof BoApiError && err.status === 409) {
@@ -237,6 +246,11 @@ export default function BoSettingsPage() {
 
   const { data, telemetry } = state;
   const canEdit = data.role === "admin";
+  const grouped: Record<string, BoSetting[]> = {};
+  for (const s of data.settings) {
+    const t = s.tab || "general";
+    (grouped[t] ??= []).push(s);
+  }
 
   return (
     <div className="bo-scope" style={{ marginTop: 20 }}>
@@ -261,35 +275,50 @@ export default function BoSettingsPage() {
         </div>
       ) : null}
 
-      <div className="bo-grid">
-        {data.settings.map((s) => (
-          <SettingEditor
-            key={s.key}
-            setting={s}
-            canEdit={canEdit}
-            onSaved={(updated) =>
-              setState((prev) =>
-                prev.kind === "data"
-                  ? {
-                      kind: "data",
-                      telemetry: prev.telemetry,
-                      data: {
-                        ...prev.data,
-                        config_version: Math.max(
-                          prev.data.config_version,
-                          updated.version,
-                        ),
-                        settings: prev.data.settings.map((x) =>
-                          x.key === updated.key ? { ...x, ...updated } : x,
-                        ),
-                      },
-                    }
-                  : prev,
-              )
-            }
-          />
-        ))}
-      </div>
+      {TAB_ORDER.filter((t) => grouped[t]?.length).map((tab) => (
+        <section key={tab} style={{ marginTop: 20 }}>
+          <h3 className="bo-card-title" style={{ marginBottom: 4 }}>
+            {TAB_LABEL[tab] ?? tab}
+          </h3>
+          {tab === "exec" ? (
+            <p className="bo-hint" style={{ marginBottom: 8 }}>
+              Parametrii de execuție și recuperare. Controalele
+              obligatorii (checkpoint, autorizarea Guardian pentru
+              mandate legate) nu pot fi dezactivate de agent — oprirea
+              lor nu poate produce efecte nedeclarate.
+            </p>
+          ) : null}
+          <div className="bo-grid">
+            {grouped[tab].map((s) => (
+              <SettingEditor
+                key={s.key}
+                setting={s}
+                canEdit={canEdit}
+                onSaved={(updated) =>
+                  setState((prev) =>
+                    prev.kind === "data"
+                      ? {
+                          kind: "data",
+                          telemetry: prev.telemetry,
+                          data: {
+                            ...prev.data,
+                            config_version: Math.max(
+                              prev.data.config_version,
+                              updated.version,
+                            ),
+                            settings: prev.data.settings.map((x) =>
+                              x.key === updated.key ? { ...x, ...updated } : x,
+                            ),
+                          },
+                        }
+                      : prev,
+                  )
+                }
+              />
+            ))}
+          </div>
+        </section>
+      ))}
 
       <div className="bo-card" style={{ marginTop: 16 }}>
         <div className="bo-spread">

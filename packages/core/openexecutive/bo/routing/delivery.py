@@ -83,7 +83,7 @@ def deliver_pending(
         db_path=db_path,
     )
     for row in claimed:
-        if row["attempts"] > max_attempts:
+        if row["series_attempts"] > max_attempts:
             store.resolve_outbox(
                 tenant, row["event_id"], kind=row["kind"],
                 ref_id=row["ref_id"], error="attempt cap reached",
@@ -92,7 +92,11 @@ def deliver_pending(
             dead += 1
             continue
         try:
-            ack = adapter.deliver_event(row["envelope"])
+            ack: dict[str, Any] | None
+            if row["kind"] == "execution":
+                ack = _deliver_execution(tenant, row, db_path)
+            else:
+                ack = adapter.deliver_event(row["envelope"])
         except TelemetryDisabledError:
             store.resolve_outbox(
                 tenant, row["event_id"], kind=row["kind"],
@@ -100,6 +104,15 @@ def deliver_pending(
                 db_path=db_path,
             )
             failed += 1
+        except _ExecutionDeadLetter as exc:
+            # Permanent refusal — retrying identical bytes can never
+            # succeed; the conflict stays inspectable in the outbox.
+            store.resolve_outbox(
+                tenant, row["event_id"], kind=row["kind"],
+                ref_id=row["ref_id"], error=str(exc)[:200],
+                dead=True, db_path=db_path,
+            )
+            dead += 1
         except Exception as exc:  # noqa: BLE001 — receiver down / ACK lost
             store.resolve_outbox(
                 tenant, row["event_id"], kind=row["kind"],
@@ -127,6 +140,40 @@ def deliver_pending(
         "sent": sent, "failed": failed, "dead": dead,
         "claimed": len(claimed),
     }
+
+
+class _ExecutionDeadLetter(Exception):
+    """Internal: an execution envelope that must dead-letter now."""
+
+
+def _deliver_execution(
+    tenant: str, row: dict[str, Any], db_path: Path | None
+) -> dict[str, Any]:
+    """Route one ``kind="execution"`` envelope to Guardian's real
+    ``/v1/execution-events`` receiver — by schema, not by kind alone.
+
+    * Provisional ``bo.execution-control.v1`` envelopes (pre-REM-01) can
+      never be accepted by the contract receiver → dead-letter visibly,
+      with the reason pointing at re-emission from the ledger.
+    * ``GuardianPermanentError`` → dead-letter (401/403/409/413/422 —
+      authorization/schema/conflict: identical retries always fail).
+    * ``GuardianTransientError`` propagates → stays pending.
+    """
+    from openexecutive.bo.execution import guardian
+
+    envelope = row["envelope"]
+    if envelope.get("schemaVersion") != "bo.execution-control.event.v1":
+        raise _ExecutionDeadLetter(
+            f"plic provizoriu "
+            f"{envelope.get('schemaVersion') or 'necunoscut'} — "
+            f"re-emis din ledger, nu retransmis"
+        )
+    try:
+        return guardian.post_execution_event(
+            tenant, envelope, db_path=db_path
+        )
+    except guardian.GuardianPermanentError as exc:
+        raise _ExecutionDeadLetter(str(exc)) from exc
 
 
 # --------------------------------------------------------------------------- #

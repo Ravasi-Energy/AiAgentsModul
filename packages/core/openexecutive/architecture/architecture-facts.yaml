@@ -4109,6 +4109,38 @@ bo:
     Ed25519 signature verify against the tenant trust store, import →
     quarantine → draft lifecycle with rollback approvals. No activation path
     exists — packages never produce external effects.
+  execution: |
+    bo/execution (VAL4-01) is the delegated-execution slice — strictly
+    separate from the observe router (a recommendation never becomes an
+    authorization). Mandates (bo_exec_mandates) bind tenant, server-derived
+    principal, parent chain, allow-lists (wildcard-aware intersection —
+    never union), budget/concurrency/step/depth limits, expiry and the
+    policyVersion snapshot; revocation and expiry are re-checked at the
+    EFFECT boundary mid-run, transitively across ancestors. Execution
+    state (bo_exec_runs + append-only bo_checkpoints) is separate from
+    the effect ledger (bo_effect_ledger): a checkpoint is execution
+    memory, never effect proof, and a checkpoint write failure blocks the
+    dependent step. The ledger keeps intentRef/idempotencyKey (stable
+    {run}:{step} across resume; same key + different payload digest is a
+    hard conflict), status INTENT/SUBMITTED/SUCCEEDED/FAILED/UNKNOWN/
+    RECONCILIATION_REQUIRED, receiptRef, lease + fence_version CAS
+    finalization (a stale worker cannot finalize after takeover), and
+    attempts. Budget + concurrency reserve atomically in one
+    BEGIN IMMEDIATE at submission. The synthetic counter provider is a
+    countable persistent local effect: idempotent providers deduplicate
+    by key; non-idempotent ones do NOT — a lost answer becomes
+    UNKNOWN/RECONCILIATION_REQUIRED resolved by receipt lookup or an
+    audited operator mark, never blind retry. Runs claim under leases
+    (lease_seq fencing); pause/cancel act at the next step boundary and
+    never reverse an executed effect. Execution events are serialized as
+    bo.execution-control.v1-shaped envelopes (A02 owns the shared schema;
+    these are the A01 domain examples) through the same durable outbox.
+    bo.exec.* settings (admin, CAS, audit): enabled (default off),
+    max_delegation_depth, max_steps, default_concurrency, lease_seconds,
+    max_effect_attempts, checkpoint_required, retention_days. Capabilities:
+    execution:read (viewer), execution:write (admin), execution:operate
+    (operator). retention.sweep removes only FINISHED runs past
+    retention_days; the audit log is out of scope.
   routing_observe: |
     bo/routing (VAL3-01) is the observe-mode model router: an administered
     catalog (provider/model/version, capabilities, regions, cost and quality

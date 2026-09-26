@@ -236,6 +236,13 @@ export const ADVANCED_ITEMS: NavItem[] = [
     description:
       "Catalogul de modele administrat și observațiile routerului în mod observare.",
   },
+  {
+    href: "/bo/executions",
+    label: "BOAgents — Execuții",
+    icon: "bolt",
+    description:
+      "Execuții delegate — mandate, checkpointuri, ledger de efecte, reluare și reconciliere.",
+  },
 ];
 
 // Anchors the mobile bottom nav. ≤5 per Material guidance; "More" opens
