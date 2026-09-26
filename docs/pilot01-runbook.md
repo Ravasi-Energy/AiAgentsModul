@@ -86,6 +86,31 @@ Readback rămâne disponibil după dezactivare, numai pe endpointul original în
 allowlisted, cu credential autorizat. Pierderea telemetriei lasă evenimentele în outbox;
 flush/retry dead-letter se administrează prin suprafețele existente.
 
+## Telemetrie degradată și reemisie (PILOT-03)
+
+Receiptul rămâne dovada efectului: o cădere de telemetrie nu transformă un
+SUCCEEDED valid în eșec și nu relaxează frontierele receiptului (tenant/digest/
+cheie/provider/timestamp greșit rămân UNKNOWN chiar dacă telemetria pică).
+`GET /bo/pilot` raportează per rulare `telemetry`: `status` (none/pending/ok/
+degraded/incident/dead/unavailable), `expected/queued/delivered/dead/missing`,
+`replayable` și marcajul din receipt (`telemetryStatus`/`telemetryError`).
+„Queued" este starea locală a outboxului, nu confirmare Guardian.
+
+Recuperare: `POST /bo/pilot/runs/{run_id}/telemetry/replay` (capabilitate
+`execution:write`, audit `bo_pilot_telemetry_replay`). Re-pune în outbox numai
+`eventId`-urile lipsă, reconstruite din `bo_pilot_observations` — dovada
+persistată la rulare — după re-validarea identității ei. Nu apelează providerul,
+nu creează efect nou, nu inventează observații. Idempotent: al doilea apel nu
+pune nimic; plicurile livrate/pending/dead-letter rămân neatinse (dead-letter
+rămâne sub fluxul existent `POST /bo/execution/outbox/{id}/retry`, cu motiv).
+Fără observație persistată → 409 cu motiv; nu se fabrică succes.
+
+Warning-urile de telemetrie loghează numai clasa excepției (ex.
+`persistarea observației pilot a eșuat (OperationalError)`), fără `exc_info`,
+text brut sau payload. Verificați logul la degradare; apoi replay, apoi
+`telemetry.status` trebuie să treacă la `incident` (după enqueue) sau `ok`
+(după livrare).
+
 ## Upgrade, dezinstalare și rollback
 
 Opriți workerii proprii înainte de upgrade, salvați SHA/configurație și o copie SQLite

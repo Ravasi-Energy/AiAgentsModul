@@ -37,9 +37,9 @@ from openexecutive.bo.execution.mandate import (
     assert_active,
 )
 from openexecutive.bo.execution.synth import (
+    EffectProvider,
     ProviderError,
     ProviderTimeout,
-    SyntheticCounterProvider,
 )
 
 logger = logging.getLogger(__name__)
@@ -153,7 +153,7 @@ def submit_execution(
 def work_once(
     tenant: str,
     *,
-    provider: SyntheticCounterProvider,
+    provider: EffectProvider,
     worker_id: str | None = None,
     limit: int = 5,
     db_path: Path | None = None,
@@ -184,7 +184,7 @@ def work_once(
 def execute_run(
     tenant: str,
     run: dict[str, Any],
-    provider: SyntheticCounterProvider,
+    provider: EffectProvider,
     *,
     worker_id: str,
     lease_s: int,
@@ -428,7 +428,7 @@ def _execute_step(
     tenant: str,
     run: dict[str, Any],
     step: int,
-    provider: SyntheticCounterProvider,
+    provider: EffectProvider,
     *,
     worker_id: str,
     lease_s: int,
@@ -493,7 +493,7 @@ def _execute_step(
                 "terminal": None, "ledger_status": store.LED_SUCCEEDED,
                 "receipt_ref": receipt["receipt_ref"],
             }
-        if not provider.idempotent or not getattr(provider, "retry_unknown", True):
+        if not provider.idempotent or not provider.retry_unknown:
             # Ambiguous external state + no dedup guarantee: a retry could
             # double the effect. Surface it, don't guess.
             store.mark_ledger_status(
@@ -644,7 +644,7 @@ def resume_run(
 def reconcile_run(
     tenant: str,
     run_id: str,
-    provider: SyntheticCounterProvider,
+    provider: EffectProvider,
     *,
     resolution: str,
     actor: str,
@@ -779,9 +779,12 @@ def _enqueue(
         routing_store.enqueue_outbox(
             tenant, "execution", ref_id, envelope, db_path=db_path,
         )
-    except Exception:  # noqa: BLE001 — telemetry must never gate execution
-        logger.warning("evenimentul de execuție nu a putut fi pus în outbox",
-                       exc_info=True)
+    except Exception as exc:  # noqa: BLE001 — telemetry must never gate execution
+        # Only the exception class reaches the log — the message can carry
+        # arbitrary internals (paths, payload echoes) that must not be
+        # persisted alongside delivery history.
+        logger.warning("evenimentul de execuție nu a putut fi pus în outbox (%s)",
+                       type(exc).__name__)
 
 
 _REASON_ALLOWED = frozenset(
@@ -844,9 +847,9 @@ def _emit_checkpoint(
         )
         _enqueue(tenant, f"{run['run_id']}:{step}:{state}:{uuid.uuid4().hex[:8]}",
                  env, db_path)
-    except Exception:  # noqa: BLE001 — telemetry must never gate execution
-        logger.warning("checkpointul de execuție nu a putut fi emis",
-                       exc_info=True)
+    except Exception as exc:  # noqa: BLE001 — telemetry must never gate execution
+        logger.warning("checkpointul de execuție nu a putut fi emis (%s)",
+                       type(exc).__name__)
 
 
 def _emit_receipt(
@@ -903,6 +906,6 @@ def _emit_receipt(
         )
         _enqueue(tenant, f"{entry['entry_id']}:receipt:{uuid.uuid4().hex[:8]}",
                  env, db_path)
-    except Exception:  # noqa: BLE001 — telemetry must never gate execution
-        logger.warning("receiptul de execuție nu a putut fi emis",
-                       exc_info=True)
+    except Exception as exc:  # noqa: BLE001 — telemetry must never gate execution
+        logger.warning("receiptul de execuție nu a putut fi emis (%s)",
+                       type(exc).__name__)

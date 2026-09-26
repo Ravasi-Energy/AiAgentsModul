@@ -129,6 +129,88 @@ def submit(identity, mandate_id, correlation_id=None, db_path=None):
         actor=identity.actor, db_path=db_path)
 
 
+def _telemetry_report(tenant, event, ledger, db_path=None):
+    """Operator-facing posture of the observation evidence on the durable
+    outbox. The receipt remains the proof of effect; this report only
+    describes whether the persisted telemetry reached the delivery queue —
+    "queued" is a local claim state, never Guardian-confirmed delivery."""
+    from openexecutive.bo.pilot.provider import expected_event_ids
+    from openexecutive.bo.routing import store as outbox_store
+    marker = error = None
+    for entry in ledger:
+        receipt = entry.get("receipt") or {}
+        if receipt.get("telemetryStatus"):
+            marker, error = receipt["telemetryStatus"], receipt.get("telemetryError")
+    report = {"status": "none", "marker": marker, "error": error, "expected": 0,
+              "queued": 0, "delivered": 0, "dead": 0, "missing": 0, "replayable": False}
+    if not event:
+        # A rejected/lost observation leaves no evidence to rebuild from;
+        # a valid receipt alone cannot fabricate health/queue/version.
+        report["status"] = "unavailable" if marker else "none"
+        return report
+    ids = expected_event_ids(event)
+    try:
+        rows = outbox_store.outbox_state(tenant, ids, db_path=db_path)
+    except Exception:  # noqa: BLE001 — the storage outage itself must be
+        # visible, not a 500: the report degrades with the marker kept, the
+        # run stays readable and replayable once the outbox store is back.
+        report.update(status="degraded", expected=len(ids), missing=len(ids),
+                      replayable=True, error="outbox_unreachable")
+        return report
+    queued = sum(1 for i in ids if i in rows)
+    missing = len(ids) - queued
+    report.update(expected=len(ids), queued=queued, missing=missing,
+                  delivered=sum(1 for i in ids if rows.get(i) == 1),
+                  dead=sum(1 for i in ids if rows.get(i) == 2))
+    if missing:
+        report["status"], report["replayable"] = "degraded", True
+    elif report["dead"]:
+        report["status"] = "dead"
+    elif marker:
+        report["status"] = "incident"
+    elif report["delivered"] < report["expected"]:
+        report["status"] = "pending"
+    else:
+        report["status"] = "ok"
+    return report
+
+
+def replay_telemetry(identity, run_id, db_path=None):
+    """Authorized re-queue of missing outbox envelopes from the persisted
+    observation — a replay of kept evidence, never a new effect, provider
+    call or invented event. Idempotent by outbox eventId; a second replay
+    queues nothing. Dead-lettered envelopes keep their history and stay
+    under the existing operator retry flow, untouched here."""
+    require(identity, "execution:write")
+    run = store.get_run(identity.tenant, run_id, db_path=db_path)
+    with get_conn(db_path) as conn:
+        row = conn.execute("SELECT event_json FROM bo_pilot_observations WHERE tenant=? AND run_id=?",
+                           (identity.tenant, run_id)).fetchone()
+    if not row:
+        raise package_store.StateError(
+            "Nicio observație persistată pentru rulare; receiptul singur nu reconstruiește telemetria")
+    event = json.loads(row["event_json"])
+    from openexecutive.bo.pilot.observation import validate
+    try:
+        validate(event, identity.tenant, run)
+    except ValueError:
+        raise package_store.StateError(
+            "Dovada observației nu mai corespunde identității curente; fără reemisie") from None
+    from openexecutive.bo.pilot.provider import emit_observation_events
+    try:
+        result = emit_observation_events(identity.tenant, run, event, db_path=db_path)
+    except Exception:
+        raise package_store.StateError(
+            "Outboxul de telemetrie este indisponibil; reîncercați după "
+            "restabilirea stocării cozii") from None
+    packages._audit(identity.tenant, identity.actor, "bo_pilot_telemetry_replay",
+                    "Reemisie telemetrie din dovada persistată; fără efect nou",
+                    {"run_id": run_id, **result})
+    ledger = store.list_ledger(identity.tenant, run_id, db_path=db_path)
+    return {"run_id": run_id, **result,
+            "telemetry": _telemetry_report(identity.tenant, event, ledger, db_path=db_path)}
+
+
 def status(identity, db_path=None):
     require(identity, "execution:read")
     runs = [r for r in store.list_runs(identity.tenant, db_path=db_path)
@@ -141,6 +223,7 @@ def status(identity, db_path=None):
         event = observations.get(run["run_id"])
         run["observation"] = event
         run["ledger"] = store.list_ledger(identity.tenant, run["run_id"], db_path=db_path)
+        run["telemetry"] = _telemetry_report(identity.tenant, event, run["ledger"], db_path=db_path)
         run["health"] = "UNKNOWN"
         if event:
             age = (datetime.now(UTC) - datetime.fromisoformat(event["observedAt"].replace("Z", "+00:00"))).total_seconds()

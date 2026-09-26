@@ -53,6 +53,18 @@ numai ledgerul și receiptul corelat confirmă efectul. Telemetria nu veto-ează
 efectul: un eșec de persistare/validare a observației este raportat ca
 `telemetryStatus: DEGRADED` în receiptul ledgerului, nu ca răspuns pierdut.
 
+PILOT-03 adaugă două suprafețe fără schimbare de contract:
+
+- `GET /bo/pilot` include per rulare `telemetry{status,expected,queued,
+  delivered,dead,missing,replayable,marker,error}` — postura outboxului citită
+  direct din `bo_telemetry_outbox`; `queued` este stare locală, nu confirmare
+  Guardian.
+- `POST /bo/pilot/runs/{run_id}/telemetry/replay` (capabilitate
+  `execution:write`, audit): re-pune în outbox plicurile lipsă reconstruite
+  exclusiv din `bo_pilot_observations`, după re-validarea identității.
+  Idempotent pe `eventId`; fără apel la provider, fără efect nou; plicurile
+  dead-letter rămân în fluxul existent de retry cu motiv.
+
 ## Fixture HTTP locală (nu API ERP propus)
 
 `python -m openexecutive.bo.pilot.fixture package --work DIR` generează pachet și

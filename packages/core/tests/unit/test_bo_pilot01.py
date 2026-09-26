@@ -281,6 +281,141 @@ def test_redirect_is_not_followed(pilot):
         thread.join(3)
 
 
+def _observation(run, observed="2026-09-26T00:00:00Z"):
+    """A contract-valid service-observation, parametric on the timestamp."""
+    return {"schemaVersion": "bo.service-observation.v1", "eventId": "obs-synthetic",
+        "producerId": "boagents", "installationId": "local-installation", "tenantRef": "tenant-a",
+        "product": "BOAgents", "observedAt": observed, "correlationId": run["correlation_id"],
+        "service": {"serviceRef": "synthetic-erp", "ownerRef": "synthetic-owner", "version": "1.0.0",
+        "synthetic": True, "queuePending": 0, "oldestPendingAt": None,
+        "executionRef": run["run_id"], "evidenceRefs": ["rcp-synthetic"]}}
+
+
+def _receipt(key="key-synthetic", digest="digest-synthetic"):
+    return {"tenant": "tenant-a", "receipt_ref": "rcp_synthetic", "provider": "synth.erp",
+        "effect_key": key, "digest": digest,
+        "amount": 1, "received_at": datetime.now(UTC).isoformat().replace("+00:00", "Z")}
+
+
+def test_telemetry_validation_failure_never_leaks_payload_to_logs(pilot, caplog):
+    import logging
+    from openexecutive.bo.pilot.observation import validate
+    result = service.submit(pilot["admin"], pilot["mandate"].mandate_id)
+    run_row = store.get_run("tenant-a", result["run_id"])
+    marker = "SYNTHETIC_PRIVATE_MARKER"
+    obs = _observation(run_row, observed=marker + "Z")
+    with pytest.raises(ValueError) as err:
+        validate(obs, "tenant-a", run_row)
+    assert marker in str(err.value)  # the raw payload reaches exception text — the leak vector
+    provider = PilotProvider("tenant-a", run_row)
+    with caplog.at_level(logging.WARNING, "openexecutive.bo.pilot.provider"):
+        accepted = provider._accept({"receipt": _receipt(), "observation": obs}, "key-synthetic", "digest-synthetic")
+    assert accepted["telemetryStatus"] == "DEGRADED" and accepted["telemetryError"] == "invalid"
+    rendered = "\n".join(logging.Formatter().format(r) for r in caplog.records)
+    assert marker not in rendered
+
+
+def test_telemetry_persistence_fault_is_sanitized_and_visible(pilot, monkeypatch, caplog):
+    import logging
+    import sqlite3
+
+    from openexecutive.bo.routing import store as outbox
+    marker = "SYNTHETIC_PATH_MARKER"
+    def broken(*args, **kwargs):
+        raise sqlite3.OperationalError("database at " + marker + " failed")
+    monkeypatch.setattr(outbox, "enqueue_outbox", broken)
+    with caplog.at_level(logging.WARNING, "openexecutive.bo.pilot.provider"):
+        result = run(pilot)
+    assert result["state"] == "SUCCEEDED"
+    entry = store.list_ledger("tenant-a", result["run_id"])[0]
+    assert entry["receipt"]["telemetryStatus"] == "DEGRADED"
+    assert entry["receipt"]["telemetryError"] == "persistence"
+    rendered = "\n".join(logging.Formatter().format(r) for r in caplog.records)
+    assert marker not in rendered
+    telemetry = service.status(pilot["admin"])["runs"][0]["telemetry"]
+    assert telemetry["status"] == "degraded" and telemetry["replayable"]
+    assert (telemetry["expected"], telemetry["queued"], telemetry["missing"]) == (3, 0, 3)
+    assert pilot["call"]("/stats") == {"effectCount": 1, "submitCalls": 1}
+
+
+@pytest.mark.parametrize("mutate", ["absent", "tenant", "timestamp"])
+def test_invalid_receipt_stays_refused_when_telemetry_fails(pilot, monkeypatch, mutate):
+    import sqlite3
+
+    from openexecutive.bo.routing import store as outbox
+    def broken(*args, **kwargs):
+        raise sqlite3.OperationalError("synthetic outage")
+    monkeypatch.setattr(outbox, "enqueue_outbox", broken)
+    result = service.submit(pilot["admin"], pilot["mandate"].mandate_id)
+    run_row = store.get_run("tenant-a", result["run_id"])
+    receipt = _receipt()
+    if mutate == "absent":
+        receipt = None
+    elif mutate == "tenant":
+        receipt["tenant"] = "tenant-b"
+    else:
+        receipt["received_at"] = "not-a-time"
+    provider = PilotProvider("tenant-a", run_row)
+    with pytest.raises(ProviderTimeout):
+        provider._accept({"receipt": receipt, "observation": _observation(run_row)},
+                         "key-synthetic", "digest-synthetic")
+
+
+def test_telemetry_replay_restores_missing_envelopes_idempotently(pilot, monkeypatch):
+    import sqlite3
+
+    from openexecutive.bo.db import get_conn
+    from openexecutive.bo.routing import store as outbox
+    events = capture_audit(monkeypatch)
+    real = outbox.enqueue_outbox
+    def partial(tenant, kind, ref_id, envelope, **kw):
+        if kind == "pilot-telemetry":
+            raise sqlite3.OperationalError("synthetic outage")
+        return real(tenant, kind, ref_id, envelope, **kw)
+    monkeypatch.setattr(outbox, "enqueue_outbox", partial)
+    result = run(pilot)
+    assert result["state"] == "SUCCEEDED"
+    telemetry = service.status(pilot["admin"])["runs"][0]["telemetry"]
+    assert telemetry["status"] == "degraded" and telemetry["missing"] == 2 and telemetry["queued"] == 1
+    monkeypatch.setattr(outbox, "enqueue_outbox", real)
+    replay = service.replay_telemetry(pilot["admin"], result["run_id"])
+    assert replay["enqueued"] == 2 and replay["existing"] == 1
+    assert replay["telemetry"]["status"] == "incident" and replay["telemetry"]["missing"] == 0
+    assert replay["telemetry"]["marker"] == "DEGRADED"  # incident history preserved
+    second = service.replay_telemetry(pilot["admin"], result["run_id"])
+    assert second["enqueued"] == 0 and second["existing"] == 3
+    assert pilot["call"]("/stats") == {"effectCount": 1, "submitCalls": 1}
+    from openexecutive.bo.pilot.provider import expected_event_ids
+    with get_conn() as conn:
+        event = json.loads(conn.execute(
+            "SELECT event_json FROM bo_pilot_observations WHERE tenant='tenant-a'").fetchone()[0])
+    ids = expected_event_ids(event)
+    with get_conn() as conn:
+        stored = {r[0] for r in conn.execute(
+            "SELECT event_id FROM bo_telemetry_outbox WHERE tenant='tenant-a' AND event_id IN (?,?,?)", ids)}
+    assert stored == set(ids)  # replays add no duplicate rows
+    claimed = outbox.claim_outbox("tenant-a", worker_id="probe", limit=50, lease_s=60)
+    assert {r["event_id"] for r in claimed if r["event_id"] in ids} == set(ids)
+    assert any(e["event_type"] == "bo_pilot_telemetry_replay" for e in events)
+
+
+def test_telemetry_replay_requires_admin_and_persisted_evidence(pilot):
+    pending = service.submit(pilot["admin"], pilot["mandate"].mandate_id)
+    viewer = Identity("v", "tenant-a", "viewer", False, "proxy_email")
+    operator = Identity("o", "tenant-a", "operator", True, "shared_secret")
+    with pytest.raises(ForbiddenError):
+        service.replay_telemetry(viewer, pending["run_id"])
+    with pytest.raises(ForbiddenError):
+        service.replay_telemetry(operator, pending["run_id"])
+    with pytest.raises(package_store.StateError):
+        service.replay_telemetry(pilot["admin"], pending["run_id"])
+    with pytest.raises(store.NotFoundError):
+        service.replay_telemetry(pilot["admin"], "run-nonexistent")
+    report = service._telemetry_report(
+        "tenant-a", None, [{"receipt": {"telemetryStatus": "DEGRADED", "telemetryError": "invalid"}}])
+    assert report["status"] == "unavailable" and not report["replayable"]
+
+
 def test_api_identity_settings_cas_and_activation(pilot, monkeypatch):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
@@ -305,3 +440,9 @@ def test_api_identity_settings_cas_and_activation(pilot, monkeypatch):
     assert client.put("/bo/pilot/activation", headers=admin, json=body).status_code == 409
     assert client.put("/bo/settings/bo.pilot.stale_s", headers=admin, json={"value": 90, "expected_version": 0}).status_code == 200
     assert client.put("/bo/settings/bo.pilot.stale_s", headers=admin, json={"value": 95, "expected_version": 0}).status_code == 409
+    viewer = {"x-api-key": "service-synthetic", "x-caller-email": "viewer@synthetic.invalid",
+              "x-caller-proxy-secret": "proxy-synthetic"}
+    assert client.post("/bo/pilot/runs/run-x/telemetry/replay", headers=viewer).status_code == 403
+    assert client.post("/bo/pilot/runs/run-x/telemetry/replay",
+                       headers={"x-api-key": "service-synthetic"}).status_code == 403
+    assert client.post("/bo/pilot/runs/run-x/telemetry/replay", headers=admin).status_code == 404

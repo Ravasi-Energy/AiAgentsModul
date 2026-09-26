@@ -161,6 +161,14 @@ def pilot_run(body: _PilotRun, ident: BoIdentity) -> Any:
     return submit(ident, **body.model_dump())
 
 
+@router.post("/pilot/runs/{run_id}/telemetry/replay")
+def pilot_telemetry_replay(run_id: str, ident: BoIdentity) -> Any:
+    """Re-queue missing observation/telemetry envelopes from the persisted
+    evidence — idempotent, audited, never a new effect or provider call."""
+    from openexecutive.bo.pilot.service import replay_telemetry
+    return replay_telemetry(ident, run_id)
+
+
 class _SettingPatch(BaseModel):
     value: Any
     expected_version: int = Field(ge=0)

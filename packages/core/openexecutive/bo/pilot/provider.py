@@ -78,13 +78,22 @@ class PilotProvider:
         # degraded telemetry, not as a lost answer — the correlated
         # receipt remains authoritative and the effect is not retried.
         observation = response.get("observation") if isinstance(response, dict) else None
-        telemetry_degraded = False
+        telemetry_error = None
         if observation:
             try:
                 self._observation(observation)
-            except Exception:  # noqa: BLE001 — telemetry must not veto the receipt
-                telemetry_degraded = True
-                logger.warning("observația pilot nu a putut fi consumată/persistată", exc_info=True)
+            except ValueError as exc:
+                # Untrusted envelope content must stay out of logs: only a
+                # sanitized stage code and the exception class are recorded —
+                # never the exception text or traceback, which can echo raw
+                # service payload (e.g. a hostile timestamp string).
+                telemetry_error = "invalid"
+                logger.warning("observația pilot respinsă la validare (%s); receiptul rămâne dovada efectului",
+                               type(exc).__name__)
+            except Exception as exc:  # noqa: BLE001 — telemetry must not veto the receipt
+                telemetry_error = "persistence"
+                logger.warning("persistarea observației pilot a eșuat (%s); receiptul rămâne dovada efectului",
+                               type(exc).__name__)
         receipt = response.get("receipt") if isinstance(response, dict) else None
         if not isinstance(receipt, dict) or receipt.get("tenant") != self.tenant \
                 or receipt.get("effect_key") != key or receipt.get("digest") != digest \
@@ -98,8 +107,9 @@ class PilotProvider:
         except (KeyError, ValueError, TypeError):
             raise ProviderTimeout("Receipt fără timestamp valid") from None
         accepted = {k: receipt[k] for k in ("receipt_ref", "provider", "effect_key", "digest", "amount", "received_at")}
-        if telemetry_degraded:
+        if telemetry_error:
             accepted["telemetryStatus"] = "DEGRADED"
+            accepted["telemetryError"] = telemetry_error
         return accepted
 
     def _observation(self, event):
@@ -110,19 +120,7 @@ class PilotProvider:
             conn.execute("""INSERT INTO bo_pilot_observations(tenant,run_id,event_json)
                 VALUES (?,?,?) ON CONFLICT(tenant,run_id) DO NOTHING""",
                 (self.tenant, self.run["run_id"], json.dumps(event)))
-        outbox.enqueue_outbox(self.tenant, "service", event["eventId"], event, db_path=self.db_path)
-        from openexecutive.bo.telemetry.schema import validate_event
-        for kind, data in [
-            ("Heartbeat", {"sequence": int(datetime.fromisoformat(event["observedAt"].replace("Z", "+00:00")).timestamp() * 1000),
-                "status": "DEGRADED" if event["service"]["queuePending"] else "HEALTHY", "observedAt": event["observedAt"]}),
-            ("RunFinished", {"executionStatus": "SUCCEEDED", "verificationStatus": "UNKNOWN"}),
-        ]:
-            telemetry = {k: event[k] for k in ("producerId", "installationId", "tenantRef", "product", "correlationId")}
-            telemetry.update(schemaVersion="bo.telemetry.v1", eventId=event["eventId"] + ("-hb" if kind == "Heartbeat" else "-run"),
-                kind=kind, occurredAt=event["observedAt"], agentRef="synthetic-erp", runRef=self.run["run_id"],
-                configVersion=self.run["steps"][0]["payload"]["config_hash"], data=data)
-            validate_event(telemetry)
-            outbox.enqueue_outbox(self.tenant, "pilot-telemetry", telemetry["eventId"], telemetry, db_path=self.db_path)
+        emit_observation_events(self.tenant, self.run, event, db_path=self.db_path)
 
     def submit(self, *, tenant, idempotency_key, payload_digest, amount):
         if tenant != self.tenant or amount != 1:
@@ -148,3 +146,39 @@ class PilotProvider:
                                 idempotency_key, entry["payload_digest"])
         except (ProviderError, ProviderTimeout, ValueError):
             return None
+
+
+def expected_event_ids(event):
+    """The outbox identities a persisted observation must produce: the
+    service-observation envelope itself plus the derived Heartbeat and
+    RunFinished telemetry events. Stable across replays — never regenerated."""
+    return [event["eventId"], event["eventId"] + "-hb", event["eventId"] + "-run"]
+
+
+def emit_observation_events(tenant, run, event, *, db_path=None):
+    """Queue the observation envelope and its derived telemetry on the
+    shared durable outbox. Idempotent: ``enqueue_outbox`` deduplicates on
+    (tenant, event_id), so an authorized replay re-adds only envelopes that
+    never persisted — pending, delivered or dead-lettered rows and their
+    history are never rewritten. Returns the per-call queueing counts."""
+    from openexecutive.bo.telemetry.schema import validate_event
+    enqueued = existing = 0
+    if outbox.enqueue_outbox(tenant, "service", event["eventId"], event, db_path=db_path):
+        enqueued += 1
+    else:
+        existing += 1
+    for kind, data in [
+        ("Heartbeat", {"sequence": int(datetime.fromisoformat(event["observedAt"].replace("Z", "+00:00")).timestamp() * 1000),
+            "status": "DEGRADED" if event["service"]["queuePending"] else "HEALTHY", "observedAt": event["observedAt"]}),
+        ("RunFinished", {"executionStatus": "SUCCEEDED", "verificationStatus": "UNKNOWN"}),
+    ]:
+        telemetry = {k: event[k] for k in ("producerId", "installationId", "tenantRef", "product", "correlationId")}
+        telemetry.update(schemaVersion="bo.telemetry.v1", eventId=event["eventId"] + ("-hb" if kind == "Heartbeat" else "-run"),
+            kind=kind, occurredAt=event["observedAt"], agentRef="synthetic-erp", runRef=run["run_id"],
+            configVersion=run["steps"][0]["payload"]["config_hash"], data=data)
+        validate_event(telemetry)
+        if outbox.enqueue_outbox(tenant, "pilot-telemetry", telemetry["eventId"], telemetry, db_path=db_path):
+            enqueued += 1
+        else:
+            existing += 1
+    return {"enqueued": enqueued, "existing": existing}

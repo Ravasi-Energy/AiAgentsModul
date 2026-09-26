@@ -4,12 +4,26 @@ import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { BoPage, Field, InlineAlert, Pill, StateBlock } from "@/components/bo/ui";
 import { BoApiError, getBoMandates, listBoPackageImports, req, workBoRuns,
-  reconcileBoRun, resumeBoRun, type BoMandate, type BoPackageImport } from "@/lib/bo";
+  reconcileBoRun, replayBoRunTelemetry, resumeBoRun,
+  type BoMandate, type BoPackageImport, type BoRunTelemetry } from "@/lib/bo";
 
 type PilotRun = { run_id: string; state: string; health: string; correlation_id: string;
   block_reason?: string; observation: null | { observedAt: string; service: {
     version: string; queuePending: number; oldestPendingAt: string | null; serviceRef: string } };
+  telemetry?: BoRunTelemetry;
   ledger: { receipt_ref: string | null; payload_digest: string; idempotency_key: string; status: string }[] };
+
+function telemetryLabel(t: BoRunTelemetry): string {
+  switch (t.status) {
+    case "ok": return "Telemetrie livrată";
+    case "pending": return "Telemetrie în coadă de livrare";
+    case "degraded": return "Telemetrie restantă — plicuri lipsă din outbox";
+    case "dead": return "Telemetrie în dead-letter — reluare din registrul outbox";
+    case "incident": return "Incident telemetrie istoric — coada refăcută";
+    case "unavailable": return "Observație indisponibilă — nereconstruibilă";
+    default: return "Fără plicuri de telemetrie";
+  }
+}
 type Pilot = { role: string; config: { enabled: boolean; profile: string; endpoint: string; supervision: string };
   activation: null | { import_id: string; version: number; active: boolean }; runs: PilotRun[] };
 
@@ -89,6 +103,14 @@ export default function PilotPage() {
         {data.runs.map(run => <article className="bo-card" key={run.run_id}>
           <h3 className="bo-card-title">{run.run_id}</h3>
           <p><Pill kind={run.health === "HEALTHY" ? "ok" : "warn"}>{run.health}</Pill> · Execuție {run.state}</p>
+          {run.telemetry && run.telemetry.status !== "none" && <p><Pill kind={
+            run.telemetry.status === "ok" ? "ok" : run.telemetry.status === "pending" ? "info" :
+            run.telemetry.status === "incident" ? "neutral" : "warn"}>{telemetryLabel(run.telemetry)}</Pill>
+            {run.telemetry.expected > 0 && <span className="bo-mono"> · {run.telemetry.queued}/{run.telemetry.expected} în coadă
+              {run.telemetry.delivered > 0 ? `, ${run.telemetry.delivered} livrate` : ""}{run.telemetry.dead > 0 ? `, ${run.telemetry.dead} dead-letter` : ""}</span>}</p>}
+          {run.telemetry?.marker && <p className="bo-muted">Efectul rămâne confirmat de receipt ({run.telemetry.marker}
+            {run.telemetry.error === "invalid" ? " — plic respins la validare" : run.telemetry.error === "persistence" ? " — persistare eșuată" : ""});
+            degradarea privește numai livrarea observației, nu rezultatul execuției.</p>}
           {run.block_reason && run.state !== "SUCCEEDED" && <InlineAlert kind="warn">{run.block_reason}</InlineAlert>}
           <p>Versiune: {run.observation?.service.version ?? "UNKNOWN"} · Coadă: {run.observation?.service.queuePending ?? "UNKNOWN"}</p>
           <p>Observat: {run.observation?.observedAt ?? "Nemăsurat"} · Cel mai vechi în coadă: {run.observation?.service.oldestPendingAt ?? "Nicio dovadă de întârziere"}</p>
@@ -99,6 +121,8 @@ export default function PilotPage() {
             onClick={() => void action(() => reconcileBoRun(run.run_id, "receipt"), "Readback terminat. Reia numai după dovadă corelată; nu se retrimite efectul.")}>Caută receipt (fără reexecutare)</button>}
           {["UNKNOWN", "RECONCILIATION_REQUIRED", "PAUSED"].includes(run.state) && <button className="bo-btn" disabled={!admin || busy}
             onClick={() => void action(() => resumeBoRun(run.run_id), "Reluare cerută; autoritatea și rezervările se reverifică.")}>Reia explicit</button>}
+          {run.telemetry?.replayable && <button className="bo-btn" disabled={!admin || busy}
+            onClick={() => void action(() => replayBoRunTelemetry(run.run_id), "Telemetrie reemisă din dovada păstrată; efectul nu a fost repetat.")}>Reemite telemetria (fără efect nou)</button>}
         </article>)}
       </section>
     </>}
